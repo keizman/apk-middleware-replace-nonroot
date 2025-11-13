@@ -29,58 +29,137 @@ run-as pkg 命令也只是获取了指定 APK 的运行时权限，获得的也�
 
 
 
-### 服务器
-一次性 
-```
+### 服务器设置
 
+#### 前置条件 (一次性设置)
+
+```bash
+# 安装必需工具
 apt install apktool -y
 apt install apksigner -y
 apt install zipalign -y
+apt install python3 python3-pip -y
+
+# 安装 Python 依赖
+pip3 install -r requirements.txt
 ```
 
-生成
-```
+#### 生成密钥库 (可选 - 不存在时自动生成)
 
+```bash
 keytool -genkey -v -keystore test_keystore.jks -alias testalias -keyalg RSA -keysize 2048 -validity 36500 -storepass testpass -keypass testpass -dname "CN=TestUser, OU=Test, O=TestOrg, L=TestCity, ST=TestState, C=US"
 
-验证生成有效 
+# 验证生成有效
 keytool -list -v -keystore test_keystore.jks -storepass testpass
 ```
 
+#### 启动服务器
 
+```bash
+python3 py_server_demo.py
+# 服务器运行在 http://0.0.0.0:8000
 ```
 
-接收 apk 上传, 
-1.校验缓存, 有则使用原有映射(已经执行过)
+### API 接口
 
-A
-apktool  d -r -s base.apk -o  extracted
+#### 1. 上传 APK - `/upload` (POST)
 
-B:
-wget http://10.8.16.141:8090/tmp/libranger-jni.so
+上传 APK 文件并配置中间件替换。
 
-C:
-cp libranger-jni.so extracted/lib/arm64-v8a/
+**参数:**
+- `file`: APK 文件 (multipart/form-data)
+- `so_download_url`: 下载替换 SO 文件的 URL
+- `so_architecture`: 目标架构 (`arm64-v8a` 或 `armeabi-v7a`)
+- `pkg_name`: 包名
+- `md5`: (可选) 预先计算的 APK MD5 用于缓存检查
 
-D:
-apktool  b extracted -o new_unsigned.apk
+**响应:**
+```json
+{
+  "task_id": "uuid",
+  "status": "pending",
+  "message": "APK processing started"
+}
+```
 
-E:
-zipalign -f -v 4 new_unsigned.apk new_aligned.apk
-zipalign -c -v 4 new_aligned.apk
+**缓存响应 (如果 MD5 存在):**
+```json
+{
+  "task_id": "uuid",
+  "status": "complete",
+  "cached": true,
+  "signed_apk_download_path": "/download_cached/{md5}",
+  "message": "APK already processed, returning cached version"
+}
+```
 
+#### 2. 检查任务状态 - `/task_status/{task_id}` (GET)
 
-F:
-apksigner sign --ks test_keystore.jks --ks-key-alias testalias --ks-pass pass:testpass --key-pass pass:testpass --in new_aligned.apk --out signed.apk
-验证包有效
-apksigner verify --verbose new_aligned.apk
+**响应:**
+```json
+{
+  "task_id": "uuid",
+  "status": "complete",
+  "filename": "app.apk",
+  "pkg_name": "com.example.app",
+  "file_md5_before": "abc123...",
+  "file_md5_after": "def456...",
+  "so_md5_before": "old123...",
+  "so_md5_after": "new456...",
+  "so_architecture": "arm64-v8a",
+  "real_so_architecture": "arm64-v8a",
+  "start_process_timestamp": 1699999999.123,
+  "end_process_timestamp": 1699999999.456,
+  "total_consume_seconds": 45.23,
+  "signed_apk_download_path": "/download/{task_id}"
+}
+```
 
+**失败响应:**
+```json
+{
+  "task_id": "uuid",
+  "status": "failed",
+  "reason": "Architecture mismatch: requested arm64-v8a, but file is armeabi-v7a"
+}
+```
 
-response
+#### 3. 下载处理后的 APK - `/download/{task_id}` (GET)
 
-替换前 ranger md5, 替换后 md5, apk md5 替换前后, 
- 
- ```
+下载已签名的 APK 文件。
+
+#### 4. 下载缓存的 APK - `/download_cached/{md5}` (GET)
+
+下载之前处理过的缓存 APK。
+
+### 处理流程
+
+1. **接收 APK 上传** → 返回 `task_id`
+2. **检查 MD5 缓存** → 如果存在,立即返回缓存结果
+3. **验证 MD5** → 确认上传文件 MD5 与请求匹配
+4. **创建工作路径** → `pkg_name + md5` (如果启用) 或仅 `md5`
+5. **解压 APK** → 使用 `apktool d -r -s`
+6. **下载 SO 文件** → 从 `so_download_url`
+7. **验证架构** → 使用 `file` 命令检测 SO 架构
+   - 64位 → `arm64-v8a` (aarch64)
+   - 32位 → `armeabi-v7a` (arm)
+   - 确认与请求的架构匹配
+   - 检查 MD5 与现有 SO 不同
+8. **替换库文件** → 复制新 SO 到 `extracted/lib/{architecture}/`
+9. **重新打包 APK** → 
+   - `apktool b` → unsigned.apk
+   - `zipalign` → aligned.apk
+   - `apksigner` → signed.apk
+   - 删除中间 APK 文件
+10. **更新索引** → 存储 MD5 映射以便将来缓存命中
+
+### 配置
+
+编辑 `py_server_demo.py` 进行配置:
+
+```python
+ENABLE_PKGNAME_BASED_PATH = True  # 使用 pkg_name + md5 作为路径名
+```
  
 ``` log
 
@@ -175,3 +254,58 @@ test_keystore 内装的就是密钥和公钥内容, 目前因需要操作的 APK
 因此一般反编译出的根本完全不是 source, 只是 LLM 有相关概念, 能看懂大概意思
 
 
+
+
+----
+
+设计完善 prompt
+
+1.server 和 client 支持多线程传输, 内网速度够快, 先不考虑
+
+enable_pkgName_based_path = Ture or false 
+
+每一步此任务处于不同状态
+1.接收APK , 完成后服务器返回 task_id
+3.check MD5 is request.md5 then md5sum_res = request.md5 , 
+4.create path name f_path = pkg_name + md5sum_res if enable_pkgName_based_path else md5sum_res
+5.extract use apktool
+6.download from  so_download_url as {A} file 
+7.confirm the real_so_architecture and the so_architecture are equal
+real_so_architecture = file {A}
+if 64-bit is arm64-v8a
+if 32-bit is armeabi-v7a
+then 
+B = extracted/lib/{real_so_architecture}
+check md5sum(A) and md5sum(B) are different
+
+8.Replacing lib, mv A to B
+9.Rebuilding APK, Aligning APK, Signing APK
+keep the final apk (Signing APK) delete other .apk file, no need delete origin apk file and extracted folder
+
+10.记录 md5 到 index
+
+success status: complete, and other param 
+generate respone {task_id: , "filename": file.filename, "file_md5_before": "",  "file_md5_after": "", "so_md5_before": "",  "so_md5_after": "so_architecture","real_so_architecture", total_consum...: , start_process_timestamp: , end_process_timestamp, Signed_apk_download_path:"", pkg_name: ""}
+
+mission failed status:  failed, reason....
+
+arm64-v8a or is equal aarch64, 
+armeabi-v7a
+
+branch 1
+1.IF request.md5 in index file, Then excute form step 6, and no need receive more bytes from client
+
+
+
+
+API 
+/upload input {"filename": file.filename, "md5": md5sum(save_path), "so_download_url", so_architecture: only suport arm64-v8a or  armeabi-v7a, pkg_name: ""}
+
+/task_status API check the current status
+
+so_download_url defualt
+
+
+完全推翻之前的代逻辑重写, 你可考虑更加完善的处理, 比如 index 只储存 一个 MD5 判断是否存在足够好? or 使用更好更快的结构体, 后期我会再考虑定期删除的, 暂定不会有太多的 index 内容 百条足矣, 你可类推. 
+不使用 process_apk.sh, 而是函数指定不同的命令, 提高自由度
+client 你可以再最后给一个 example 即可包括框架定义, 不用太详细,  因为不会实际在这里使用 client 
