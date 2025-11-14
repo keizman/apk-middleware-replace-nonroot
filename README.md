@@ -56,114 +56,39 @@ keytool -genkey -v -keystore test_keystore.jks -alias testalias -keyalg RSA -key
 keytool -list -v -keystore test_keystore.jks -storepass testpass
 ```
 
-#### Start Server
+####  Server
 
-```bash
-python3 py_server_demo.py
-# Server runs on http://0.0.0.0:8000
+
+
 ```
 
-### API Endpoints
+接收 apk 上传, 
+1.校验缓存, 有则使用原有映射(已经执行过)
 
-#### 1. Upload APK - `/upload` (POST)
+A
+apktool  d -r -s base.apk -o  extracted
 
-Upload APK file with middleware replacement configuration.
+B:
+wget http://10.8.16.141:8090/tmp/***.so
 
-**Parameters:**
-- `file`: APK file (multipart/form-data)
-- `so_download_url`: URL to download replacement SO file
-- `so_architecture`: Target architecture (`arm64-v8a` or `armeabi-v7a`)
-- `pkg_name`: Package name
-- `md5`: (Optional) Pre-calculated APK MD5 for cache checking
+C:
+cp ***.so extracted/lib/arm64-v8a/
 
-**Response:**
-```json
-{
-  "task_id": "uuid",
-  "status": "pending",
-  "message": "APK processing started"
-}
-```
+D:
+apktool  b extracted -o new_unsigned.apk
 
-**Cached Response (if MD5 exists):**
-```json
-{
-  "task_id": "uuid",
-  "status": "complete",
-  "cached": true,
-  "signed_apk_download_path": "/download_cached/{md5}",
-  "message": "APK already processed, returning cached version"
-}
-```
+E:
+zipalign -f -v 4 new_unsigned.apk new_aligned.apk
+zipalign -c -v 4 new_aligned.apk
 
-#### 2. Check Task Status - `/task_status/{task_id}` (GET)
 
-**Response:**
-```json
-{
-  "task_id": "uuid",
-  "status": "complete",
-  "filename": "app.apk",
-  "pkg_name": "com.example.app",
-  "file_md5_before": "abc123...",
-  "file_md5_after": "def456...",
-  "so_md5_before": "old123...",
-  "so_md5_after": "new456...",
-  "so_architecture": "arm64-v8a",
-  "real_so_architecture": "arm64-v8a",
-  "start_process_timestamp": 1699999999.123,
-  "end_process_timestamp": 1699999999.456,
-  "total_consume_seconds": 45.23,
-  "signed_apk_download_path": "/download/{task_id}"
-}
-```
+F:
+apksigner sign --ks test_keystore.jks --ks-key-alias testalias --ks-pass pass:testpass --key-pass pass:testpass --in new_aligned.apk --out signed.apk
+验证包有效
+apksigner verify --verbose new_aligned.apk
 
-**Failed Response:**
-```json
-{
-  "task_id": "uuid",
-  "status": "failed",
-  "reason": "Architecture mismatch: requested arm64-v8a, but file is armeabi-v7a"
-}
-```
 
-#### 3. Download Processed APK - `/download/{task_id}` (GET)
 
-Downloads the signed APK file.
-
-#### 4. Download Cached APK - `/download_cached/{md5}` (GET)
-
-Downloads previously processed APK from cache.
-
-### Processing Workflow
-
-1. **Receive APK Upload** → Return `task_id`
-2. **Check MD5 Cache** → If exists, return cached result immediately
-3. **Validate MD5** → Confirm uploaded file MD5 matches request
-4. **Create Work Path** → `pkg_name + md5` (if enabled) or `md5` only
-5. **Extract APK** → Using `apktool d -r -s`
-6. **Download SO File** → From `so_download_url`
-7. **Verify Architecture** → Use `file` command to detect SO architecture
-   - 64-bit → `arm64-v8a` (aarch64)
-   - 32-bit → `armeabi-v7a` (arm)
-   - Confirm matches requested architecture
-   - Check MD5 differs from existing SO
-8. **Replace Library** → Copy new SO to `extracted/lib/{architecture}/`
-9. **Rebuild APK** → 
-   - `apktool b` → unsigned.apk
-   - `zipalign` → aligned.apk
-   - `apksigner` → signed.apk
-   - Delete intermediate APK files
-10. **Update Index** → Store MD5 mapping for future cache hits
-
-### Configuration
-
-Edit `py_server_demo.py` to configure:
-
-```python
-ENABLE_PKGNAME_BASED_PATH = True  # Use pkg_name + md5 for path names
-```
- 
 ``` log
 
 Verifies

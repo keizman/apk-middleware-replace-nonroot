@@ -53,113 +53,40 @@ keytool -genkey -v -keystore test_keystore.jks -alias testalias -keyalg RSA -key
 keytool -list -v -keystore test_keystore.jks -storepass testpass
 ```
 
-#### 启动服务器
 
-```bash
-python3 py_server_demo.py
-# 服务器运行在 http://0.0.0.0:8000
+
 ```
 
-### API 接口
+接收 apk 上传, 
+1.校验缓存, 有则使用原有映射(已经执行过)
 
-#### 1. 上传 APK - `/upload` (POST)
+A
+apktool  d -r -s base.apk -o  extracted
 
-上传 APK 文件并配置中间件替换。
+B:
+wget http://10.8.16.141:8090/tmp/***.so
 
-**参数:**
-- `file`: APK 文件 (multipart/form-data)
-- `so_download_url`: 下载替换 SO 文件的 URL
-- `so_architecture`: 目标架构 (`arm64-v8a` 或 `armeabi-v7a`)
-- `pkg_name`: 包名
-- `md5`: (可选) 预先计算的 APK MD5 用于缓存检查
+C:
+cp ***.so extracted/lib/arm64-v8a/
 
-**响应:**
-```json
-{
-  "task_id": "uuid",
-  "status": "pending",
-  "message": "APK processing started"
-}
-```
+D:
+apktool  b extracted -o new_unsigned.apk
 
-**缓存响应 (如果 MD5 存在):**
-```json
-{
-  "task_id": "uuid",
-  "status": "complete",
-  "cached": true,
-  "signed_apk_download_path": "/download_cached/{md5}",
-  "message": "APK already processed, returning cached version"
-}
-```
+E:
+zipalign -f -v 4 new_unsigned.apk new_aligned.apk
+zipalign -c -v 4 new_aligned.apk
 
-#### 2. 检查任务状态 - `/task_status/{task_id}` (GET)
 
-**响应:**
-```json
-{
-  "task_id": "uuid",
-  "status": "complete",
-  "filename": "app.apk",
-  "pkg_name": "com.example.app",
-  "file_md5_before": "abc123...",
-  "file_md5_after": "def456...",
-  "so_md5_before": "old123...",
-  "so_md5_after": "new456...",
-  "so_architecture": "arm64-v8a",
-  "real_so_architecture": "arm64-v8a",
-  "start_process_timestamp": 1699999999.123,
-  "end_process_timestamp": 1699999999.456,
-  "total_consume_seconds": 45.23,
-  "signed_apk_download_path": "/download/{task_id}"
-}
-```
+F:
+apksigner sign --ks test_keystore.jks --ks-key-alias testalias --ks-pass pass:testpass --key-pass pass:testpass --in new_aligned.apk --out signed.apk
+验证包有效
+apksigner verify --verbose new_aligned.apk
 
-**失败响应:**
-```json
-{
-  "task_id": "uuid",
-  "status": "failed",
-  "reason": "Architecture mismatch: requested arm64-v8a, but file is armeabi-v7a"
-}
-```
 
-#### 3. 下载处理后的 APK - `/download/{task_id}` (GET)
+response
 
-下载已签名的 APK 文件。
-
-#### 4. 下载缓存的 APK - `/download_cached/{md5}` (GET)
-
-下载之前处理过的缓存 APK。
-
-### 处理流程
-
-1. **接收 APK 上传** → 返回 `task_id`
-2. **检查 MD5 缓存** → 如果存在,立即返回缓存结果
-3. **验证 MD5** → 确认上传文件 MD5 与请求匹配
-4. **创建工作路径** → `pkg_name + md5` (如果启用) 或仅 `md5`
-5. **解压 APK** → 使用 `apktool d -r -s`
-6. **下载 SO 文件** → 从 `so_download_url`
-7. **验证架构** → 使用 `file` 命令检测 SO 架构
-   - 64位 → `arm64-v8a` (aarch64)
-   - 32位 → `armeabi-v7a` (arm)
-   - 确认与请求的架构匹配
-   - 检查 MD5 与现有 SO 不同
-8. **替换库文件** → 复制新 SO 到 `extracted/lib/{architecture}/`
-9. **重新打包 APK** → 
-   - `apktool b` → unsigned.apk
-   - `zipalign` → aligned.apk
-   - `apksigner` → signed.apk
-   - 删除中间 APK 文件
-10. **更新索引** → 存储 MD5 映射以便将来缓存命中
-
-### 配置
-
-编辑 `py_server_demo.py` 进行配置:
-
-```python
-ENABLE_PKGNAME_BASED_PATH = True  # 使用 pkg_name + md5 作为路径名
-```
+替换前 ranger md5, 替换后 md5, apk md5 替换前后, 
+ 
  
 ``` log
 
