@@ -322,7 +322,7 @@ async def process_apk_task(
         lib_path = extracted_dir / "lib" / real_so_arch
         lib_path.mkdir(parents=True, exist_ok=True)
         
-        existing_so = lib_path / "libranger-jni.so"
+        existing_so = lib_path / "***.so"
         if existing_so.exists():
             so_md5_before = md5sum(existing_so)
             task.so_md5_before = so_md5_before
@@ -541,17 +541,156 @@ async def download_cached_apk(file_md5: str, so_architecture: Optional[str] = No
     )
 
 
+@app.post("/exist_pkg")
+async def exist_pkg(
+    background_tasks: BackgroundTasks,
+    md5: str = Form(...),
+    so_download_url: str = Form(...),
+    so_architecture: str = Form(...),
+    pkg_name: str = Form(...)
+):
+    """
+    Process existing APK by MD5 (file upload not required)
+    
+    Use this endpoint when APK MD5 exists in index.
+    The original APK file will be retrieved from cache for processing.
+    
+    Parameters:
+    - md5: MD5 hash of APK (required, must exist in index)
+    - so_download_url: URL to download SO file
+    - so_architecture: arm64-v8a or armeabi-v7a
+    - pkg_name: Package name
+    
+    Note: This endpoint requires the APK to have been uploaded before.
+    Check /index first to verify MD5 exists.
+    """
+    # Validate architecture
+    if so_architecture not in ["arm64-v8a", "armeabi-v7a"]:
+        raise HTTPException(
+            status_code=400,
+            detail="so_architecture must be 'arm64-v8a' or 'armeabi-v7a'"
+        )
+    
+    # Validate MD5 format
+    if not (len(md5) == 32 and all(c in '0123456789abcdefABCDEF' for c in md5)):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid MD5 format. Must be 32 hexadecimal characters."
+        )
+    
+    md5_lower = md5.lower()
+    
+    # Check if MD5 exists in index
+    index = load_index()
+    if md5_lower not in index:
+        raise HTTPException(
+            status_code=404,
+            detail=f"MD5 {md5_lower} not found in index. Use /upload endpoint for new APKs."
+        )
+    
+    # Find the original APK file from previous uploads
+    # Check in uploads directory for any APK with matching MD5
+    original_apk = None
+    for apk_file in UPLOAD_DIR.glob("*.apk"):
+        if md5sum(apk_file) == md5_lower:
+            original_apk = apk_file
+            break
+    
+    if not original_apk or not original_apk.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Original APK file not found for MD5 {md5_lower}. Please re-upload using /upload endpoint."
+        )
+    
+    # Generate new task ID
+    task_id = str(uuid.uuid4())
+    
+    # Copy original APK to new location for this task
+    apk_filename = f"{task_id}_{original_apk.name.split('_', 1)[-1]}"
+    save_path = UPLOAD_DIR / apk_filename
+    shutil.copy(original_apk, save_path)
+    
+    # Create task
+    task = TaskInfo(
+        task_id=task_id,
+        status=TaskStatus.PENDING,
+        filename=original_apk.name,
+        pkg_name=pkg_name,
+        file_md5_before=md5_lower,
+        so_architecture=so_architecture
+    )
+    tasks[task_id] = task
+    
+    # Start background processing
+    background_tasks.add_task(
+        process_apk_task,
+        task_id,
+        save_path,
+        so_download_url,
+        so_architecture,
+        pkg_name,
+        md5_lower
+    )
+    
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "message": "APK processing started (using existing APK from cache)",
+        "md5": md5_lower
+    }
+
+
 @app.get("/index")
 async def get_index():
     """Get current index"""
     return load_index()
 
 
+@app.get("/check_md5/{md5}")
+async def check_md5(md5: str):
+    """
+    Check if MD5 exists in index
+    
+    Use this endpoint before deciding whether to use /upload or /exist_pkg
+    
+    Returns:
+    - exists: boolean indicating if MD5 is in index
+    - count: number of tasks for this MD5
+    - latest_task: most recent task info (if exists)
+    """
+    # Validate MD5 format
+    if not (len(md5) == 32 and all(c in '0123456789abcdefABCDEF' for c in md5)):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid MD5 format. Must be 32 hexadecimal characters."
+        )
+    
+    md5_lower = md5.lower()
+    index = load_index()
+    
+    if md5_lower not in index:
+        return {
+            "exists": False,
+            "md5": md5_lower,
+            "count": 0
+        }
+    
+    tasks_list = index[md5_lower]
+    latest_task = max(tasks_list, key=lambda x: x.get("timestamp", 0)) if tasks_list else None
+    
+    return {
+        "exists": True,
+        "md5": md5_lower,
+        "count": len(tasks_list),
+        "latest_task": latest_task
+    }
+
+
 @app.get("/")
 def root():
     return JSONResponse({
         "msg": "APK Middleware Replacement Server",
-        "version": "2.1",
+        "version": "2.2",
         "status": "running"
     })
 

@@ -8,14 +8,29 @@ http://localhost:8000
 
 ## API Version
 
-**Version**: 2.0  
+**Version**: 2.2  
 **Protocol**: HTTP/HTTPS  
 **Format**: JSON  
 **Character Encoding**: UTF-8
 
 ---
 
-## Endpoints
+## Endpoints Overview
+
+| Endpoint | Method | Purpose | Use Case |
+|----------|--------|---------|----------|
+| `/` | GET | Health check | Verify server status |
+| `/check_md5/{md5}` | GET | Check if MD5 exists | Decide which upload endpoint to use |
+| `/upload` | POST | Upload new APK | When MD5 not in index |
+| `/exist_pkg` | POST | Process existing APK | When MD5 in index (no file upload) |
+| `/task_status/{task_id}` | GET | Get task status | Monitor processing |
+| `/download/{task_id}` | GET | Download by task ID | Get specific task result |
+| `/download_cached/{md5}` | GET | Download by MD5 | Get latest result for MD5 |
+| `/index` | GET | View all cached entries | Browse history |
+
+---
+
+## Endpoints Details
 
 ### 1. Server Health Check
 
@@ -39,11 +54,77 @@ http://localhost:8000
 
 ---
 
-### 2. Upload APK
+### 2. Check MD5 Exists
+
+**Endpoint**: `GET /check_md5/{md5}`
+
+**Description**: Check if an APK MD5 exists in the index. Use this to decide whether to use `/upload` or `/exist_pkg`.
+
+#### Path Parameters
+
+| Parameter | Type | Required | Description | Validation Rules |
+|-----------|------|----------|-------------|------------------|
+| `md5` | String | **Yes** | MD5 hash of APK | - 32 hexadecimal characters<br>- Pattern: `^[a-f0-9]{32}$`<br>- Case-insensitive |
+
+#### Request Example
+
+```bash
+curl http://localhost:8000/check_md5/5d41402abc4b2a76b9719d911017c592
+```
+
+#### Success Response (MD5 Exists)
+
+**Status Code**: `200 OK`
+
+```json
+{
+  "exists": true,
+  "md5": "5d41402abc4b2a76b9719d911017c592",
+  "count": 3,
+  "latest_task": {
+    "task_id": "550e8400-e29b-41d4-a716-446655440000",
+    "pkg_name": "com.example.app",
+    "so_architecture": "arm64-v8a",
+    "signed_apk_path": "./workdir/processed/550e8400-..._signed.apk",
+    "file_md5_after": "7d793037a0760186574b0282f2f435e7",
+    "timestamp": 1699999999.123
+  }
+}
+```
+
+#### Success Response (MD5 Not Found)
+
+**Status Code**: `200 OK`
+
+```json
+{
+  "exists": false,
+  "md5": "5d41402abc4b2a76b9719d911017c592",
+  "count": 0
+}
+```
+
+**Decision Logic**:
+- If `exists: false` → Use `/upload` endpoint (need to upload file)
+- If `exists: true` → Use `/exist_pkg` endpoint (no file upload needed)
+
+#### Error Response
+
+**Status Code**: `400 Bad Request`
+
+```json
+{
+  "detail": "Invalid MD5 format. Must be 32 hexadecimal characters."
+}
+```
+
+---
+
+### 3. Upload New APK
 
 **Endpoint**: `POST /upload`
 
-**Description**: Upload an APK file for middleware replacement processing. Returns immediately with a task ID for status tracking.
+**Description**: Upload a new APK file for middleware replacement processing. Use this when MD5 is not in index. Returns immediately with a task ID for status tracking.
 
 **Content-Type**: `multipart/form-data`
 
@@ -52,7 +133,7 @@ http://localhost:8000
 | Parameter | Type | Required | Description | Validation Rules |
 |-----------|------|----------|-------------|------------------|
 | `file` | File | **Yes** | APK file to process | - Must be a valid file<br>- File extension should be `.apk`<br>- Recommended max size: 500MB<br>- File must not be empty |
-| `so_download_url` | String | **Yes** | URL to download the replacement SO file | - Must be a valid HTTP/HTTPS URL<br>- URL must be accessible<br>- Max length: 2048 characters<br>- Examples:<br>&nbsp;&nbsp;`http://example.com/lib.so`<br>&nbsp;&nbsp;`https://cdn.example.com/files/libranger-jni.so` |
+| `so_download_url` | String | **Yes** | URL to download the replacement SO file | - Must be a valid HTTP/HTTPS URL<br>- URL must be accessible<br>- Max length: 2048 characters<br>- Examples:<br>&nbsp;&nbsp;`http://example.com/lib.so`<br>&nbsp;&nbsp;`https://cdn.example.com/files/***.so` |
 | `so_architecture` | String | **Yes** | Target architecture for SO file | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive<br>- No other values accepted |
 | `pkg_name` | String | **Yes** | Android package name | - Format: reverse domain notation<br>- Pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`<br>- Min length: 3 characters<br>- Max length: 255 characters<br>- Examples:<br>&nbsp;&nbsp;`com.example.app`<br>&nbsp;&nbsp;`com.company.product.module` |
 | `md5` | String | No | Pre-calculated MD5 hash of APK | - Format: 32 hexadecimal characters<br>- Pattern: `^[a-f0-9]{32}$`<br>- Case-insensitive<br>- If provided, server verifies MD5 matches uploaded file<br>- If omitted, server calculates MD5<br>- Example: `5d41402abc4b2a76b9719d911017c592` |
@@ -62,7 +143,7 @@ http://localhost:8000
 ```bash
 curl -X POST http://localhost:8000/upload \
   -F "file=@/path/to/app.apk" \
-  -F "so_download_url=https://cdn.example.com/libranger-jni.so" \
+  -F "so_download_url=https://cdn.example.com/***.so" \
   -F "so_architecture=arm64-v8a" \
   -F "pkg_name=com.example.myapp" \
   -F "md5=5d41402abc4b2a76b9719d911017c592"
@@ -130,7 +211,91 @@ Missing required parameters:
 
 ---
 
-### 3. Get Task Status
+### 4. Process Existing APK
+
+**Endpoint**: `POST /exist_pkg`
+
+**Description**: Process an APK that already exists in the index (no file upload required). Use this when MD5 is found in index. The server will use the previously uploaded APK file.
+
+**Content-Type**: `application/x-www-form-urlencoded` or `multipart/form-data`
+
+#### Parameters
+
+| Parameter | Type | Required | Description | Validation Rules |
+|-----------|------|----------|-------------|------------------|
+| `md5` | String | **Yes** | MD5 hash of existing APK | - 32 hexadecimal characters<br>- Pattern: `^[a-f0-9]{32}$`<br>- Case-insensitive<br>- **Must exist in index** |
+| `so_download_url` | String | **Yes** | URL to download the replacement SO file | - Must be a valid HTTP/HTTPS URL<br>- URL must be accessible<br>- Max length: 2048 characters |
+| `so_architecture` | String | **Yes** | Target architecture for SO file | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive |
+| `pkg_name` | String | **Yes** | Android package name | - Format: reverse domain notation<br>- Pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`<br>- Min length: 3 characters<br>- Max length: 255 characters |
+
+#### Request Example (cURL)
+
+```bash
+curl -X POST http://localhost:8000/exist_pkg \
+  -F "md5=5d41402abc4b2a76b9719d911017c592" \
+  -F "so_download_url=https://cdn.example.com/***.so" \
+  -F "so_architecture=arm64-v8a" \
+  -F "pkg_name=com.example.myapp"
+```
+
+**Note**: No file upload required. The server uses the original APK file from cache.
+
+#### Success Response
+
+**Status Code**: `200 OK`
+
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "pending",
+  "message": "APK processing started (using existing APK from cache)",
+  "md5": "5d41402abc4b2a76b9719d911017c592"
+}
+```
+
+**Processing Behavior**:
+- Uses existing APK file from cache (no upload needed)
+- Processes with new SO file and creates new task entry
+- Saves result to index like normal upload
+- Original APK file must exist in uploads directory
+
+#### Error Responses
+
+**Status Code**: `400 Bad Request`
+
+Invalid architecture:
+```json
+{
+  "detail": "so_architecture must be 'arm64-v8a' or 'armeabi-v7a'"
+}
+```
+
+Invalid MD5 format:
+```json
+{
+  "detail": "Invalid MD5 format. Must be 32 hexadecimal characters."
+}
+```
+
+**Status Code**: `404 Not Found`
+
+MD5 not in index:
+```json
+{
+  "detail": "MD5 5d41402a... not found in index. Use /upload endpoint for new APKs."
+}
+```
+
+Original APK file not found:
+```json
+{
+  "detail": "Original APK file not found for MD5 5d41402a.... Please re-upload using /upload endpoint."
+}
+```
+
+---
+
+### 5. Get Task Status
 
 **Endpoint**: `GET /task_status/{task_id}`
 
@@ -492,7 +657,7 @@ curl http://localhost:8000/index
 
 **Valid Examples**:
 - `http://example.com/file.so`
-- `https://cdn.example.com/libs/libranger-jni.so`
+- `https://cdn.example.com/libs/***.so`
 - `https://storage.googleapis.com/bucket/file.so`
 
 ### Architecture Values
