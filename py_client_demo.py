@@ -47,6 +47,9 @@ class APKProcessClient:
             so_files: Dictionary of SO files to replace
                      Format: {"so_name1": "url1", "so_name2": "url2"}
                      Example: {"libgame.so": "http://example.com/libgame.so"}
+                     Note: Empty/null URLs are automatically skipped
+                           At least one valid URL is required
+                           Any download failure causes entire task to fail
             so_architecture: arm64-v8a or armeabi-v7a
             pkg_name: Package name
             md5: Optional pre-calculated MD5
@@ -84,6 +87,9 @@ class APKProcessClient:
             so_files: Dictionary of SO files to replace
                      Format: {"so_name1": "url1", "so_name2": "url2"}
                      Example: {"libgame.so": "http://example.com/libgame.so"}
+                     Note: Empty/null URLs are automatically skipped
+                           At least one valid URL is required
+                           Any download failure causes entire task to fail
             so_architecture: arm64-v8a or armeabi-v7a
             pkg_name: Package name
         """

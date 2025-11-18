@@ -133,7 +133,7 @@ curl http://localhost:8000/check_md5/5d41402abc4b2a76b9719d911017c592
 | Parameter | Type | Required | Description | Validation Rules |
 |-----------|------|----------|-------------|------------------|
 | `file` | File | **Yes** | APK file to process | - Must be a valid file<br>- File extension should be `.apk`<br>- Recommended max size: 500MB<br>- File must not be empty |
-| `so_files` | String (JSON) | **Yes** | JSON string of SO files to replace | - Must be a valid JSON object<br>- Format: `{"so_name1": "url1", "so_name2": "url2"}`<br>- Cannot be empty<br>- Keys: SO filenames (e.g., "libgame.so")<br>- Values: HTTP/HTTPS download URLs<br>- Max URLs: 10<br>- Example:<br>&nbsp;&nbsp;`{"libgame.so": "http://example.com/libgame.so", "libengine.so": "http://example.com/libengine.so"}` |
+| `so_files` | String (JSON) | **Yes** | JSON string of SO files to replace | - Must be a valid JSON object<br>- Format: `{"so_name1": "url1", "so_name2": "url2"}`<br>- At least one valid (non-empty) URL required<br>- Keys: SO filenames (e.g., "libgame.so")<br>- Values: HTTP/HTTPS download URLs<br>- **Empty/null URLs are automatically skipped**<br>- Max URLs: 10<br>- **Any download failure causes entire task to fail**<br>- Example:<br>&nbsp;&nbsp;`{"libgame.so": "http://example.com/libgame.so", "libengine.so": "http://example.com/libengine.so"}` |
 | `so_architecture` | String | **Yes** | Target architecture for SO files | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive<br>- All SO files must match this architecture<br>- No other values accepted |
 | `pkg_name` | String | **Yes** | Android package name | - Format: reverse domain notation<br>- Pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`<br>- Min length: 3 characters<br>- Max length: 255 characters<br>- Examples:<br>&nbsp;&nbsp;`com.example.app`<br>&nbsp;&nbsp;`com.company.product.module` |
 | `md5` | String | No | Pre-calculated MD5 hash of APK | - Format: 32 hexadecimal characters<br>- Pattern: `^[a-f0-9]{32}$`<br>- Case-insensitive<br>- If provided, server verifies MD5 matches uploaded file<br>- If omitted, server calculates MD5<br>- Example: `5d41402abc4b2a76b9719d911017c592` |
@@ -168,6 +168,12 @@ curl -X POST http://localhost:8000/upload \
 - Each successful processing is saved to index with timestamp
 - Index maintains up to 10 most recent tasks per APK MD5
 - MD5 verification: If `md5` is provided, server verifies it matches the uploaded file
+- **SO File Handling**:
+  - Empty/null URLs in `so_files` are automatically skipped (no error)
+  - At least one valid SO file URL is required
+  - All SO files are downloaded and validated before any replacement
+  - If ANY SO file download fails, the entire task fails immediately
+  - All SO files must match the specified architecture
 
 #### Error Responses
 
@@ -224,7 +230,7 @@ Missing required parameters:
 | Parameter | Type | Required | Description | Validation Rules |
 |-----------|------|----------|-------------|------------------|
 | `md5` | String | **Yes** | MD5 hash of existing APK | - 32 hexadecimal characters<br>- Pattern: `^[a-f0-9]{32}$`<br>- Case-insensitive<br>- **Must exist in index** |
-| `so_files` | String (JSON) | **Yes** | JSON string of SO files to replace | - Must be a valid JSON object<br>- Format: `{"so_name1": "url1", "so_name2": "url2"}`<br>- Cannot be empty<br>- Keys: SO filenames<br>- Values: HTTP/HTTPS download URLs |
+| `so_files` | String (JSON) | **Yes** | JSON string of SO files to replace | - Must be a valid JSON object<br>- Format: `{"so_name1": "url1", "so_name2": "url2"}`<br>- At least one valid (non-empty) URL required<br>- Keys: SO filenames<br>- Values: HTTP/HTTPS download URLs<br>- **Empty/null URLs are automatically skipped**<br>- **Any download failure causes entire task to fail** |
 | `so_architecture` | String | **Yes** | Target architecture for SO files | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive<br>- All SO files must match this architecture |
 | `pkg_name` | String | **Yes** | Android package name | - Format: reverse domain notation<br>- Pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`<br>- Min length: 3 characters<br>- Max length: 255 characters |
 
@@ -255,9 +261,15 @@ curl -X POST http://localhost:8000/exist_pkg \
 
 **Processing Behavior**:
 - Uses existing APK file from cache (no upload needed)
-- Processes with new SO file and creates new task entry
+- Processes with new SO files and creates new task entry
 - Saves result to index like normal upload
 - Original APK file must exist in uploads directory
+- **SO File Handling**:
+  - Empty/null URLs in `so_files` are automatically skipped (no error)
+  - At least one valid SO file URL is required
+  - All SO files are downloaded and validated before any replacement
+  - If ANY SO file download fails, the entire task fails immediately
+  - All SO files must match the specified architecture
 
 #### Error Responses
 
@@ -964,6 +976,11 @@ Keep track of task IDs for later reference. Use `/index` endpoint to query histo
 - Any architecture mismatch causes task failure
 - SO MD5 fields now return JSON objects containing all SO file hashes
 - Enhanced security through dynamic SO file naming
+- **Robustness improvements**:
+  - Empty/null URLs in `so_files` are automatically skipped (no error)
+  - At least one valid SO URL is required
+  - Any SO file download failure causes entire task to fail immediately
+  - All-or-nothing approach ensures consistency
 
 **Version 2.2**
 - Added SMB network installation support

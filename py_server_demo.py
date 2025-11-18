@@ -317,7 +317,17 @@ async def process_apk_task(
         so_replacement_info = {}
         downloaded_files = []
         
+        # Check if there's at least one valid SO file to process
+        valid_so_files = {k: v for k, v in so_files.items() if v and v.strip()}
+        if not valid_so_files:
+            raise Exception("No valid SO files to process. All URLs are empty.")
+        
         for so_name, so_url in so_files.items():
+            # Skip if URL is empty or None (compatibility for exceptional cases)
+            if not so_url or not so_url.strip():
+                print(f"Skipping SO file: {so_name} (empty URL)")
+                continue
+            
             print(f"Processing SO file: {so_name}")
             
             # Download SO file
@@ -361,6 +371,10 @@ async def process_apk_task(
         
         # Step 8: All architectures verified, proceed with replacement
         for so_name, so_url in so_files.items():
+            # Skip if URL was empty (already skipped in download phase)
+            if not so_url or not so_url.strip():
+                continue
+            
             downloaded_so = work_path / f"downloaded_{so_name}"
             target_so = lib_path / so_name
             shutil.copy(downloaded_so, target_so)
@@ -788,4 +802,4 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8800)
