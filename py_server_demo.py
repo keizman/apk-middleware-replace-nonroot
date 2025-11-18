@@ -24,6 +24,12 @@ PROCESSED_DIR = WORKDIR / "processed"
 TEMP_DIR = WORKDIR / "temp"
 INDEX_FILE = WORKDIR / "index.json"
 
+# SMB Configuration for network installation
+# Set this to your SMB share path, e.g., "\\192.168.1.100\apk\"
+# Leave empty to disable SMB path generation
+SMB_BASE_PATH = ""  # Example: "\\\\192.168.1.100\\apk\\"
+DOWNLOAD_BASE_PATH = ""  # Example: "\\\\192.168.1.100\\apk\\"
+
 for d in [UPLOAD_DIR, PROCESSED_DIR, TEMP_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
@@ -56,6 +62,7 @@ class TaskInfo(BaseModel):
     end_process_timestamp: Optional[float] = None
     total_consume_seconds: Optional[float] = None
     signed_apk_download_path: Optional[str] = None
+    smb_path: Optional[str] = None
     reason: Optional[str] = None
 
 
@@ -271,12 +278,18 @@ def run_apksigner(input_apk: Path, output_apk: Path) -> bool:
 async def process_apk_task(
     task_id: str,
     apk_path: Path,
-    so_download_url: str,
+    so_files: dict,
     so_architecture: str,
     pkg_name: str,
     file_md5: str
 ):
-    """Background task to process APK"""
+    """
+    Background task to process APK
+    
+    Args:
+        so_files: Dictionary of {so_filename: download_url}
+                 Example: {"libgame.so": "http://...", "libengine.so": "http://..."}
+    """
     task = tasks[task_id]
     task.status = TaskStatus.PROCESSING
     task.start_process_timestamp = time.time()
@@ -297,43 +310,70 @@ async def process_apk_task(
         if not run_apktool_decode(apk_path, extracted_dir):
             raise Exception("Failed to decode APK")
         
-        # Step 6: Download SO file
-        downloaded_so = work_path / "downloaded.so"
-        if not await download_file(so_download_url, downloaded_so):
-            raise Exception("Failed to download SO file")
-        
-        so_md5_after = md5sum(downloaded_so)
-        task.so_md5_after = so_md5_after
-        
-        # Step 7: Verify architecture
-        real_so_arch = detect_so_architecture(downloaded_so)
-        if not real_so_arch:
-            raise Exception("Failed to detect SO architecture")
-        
-        task.real_so_architecture = real_so_arch
-        
-        if real_so_arch != so_architecture:
-            raise Exception(
-                f"Architecture mismatch: requested {so_architecture}, "
-                f"but file is {real_so_arch}"
-            )
-        
-        # Check existing SO
-        lib_path = extracted_dir / "lib" / real_so_arch
+        # Step 6: Download and verify all SO files
+        lib_path = extracted_dir / "lib" / so_architecture
         lib_path.mkdir(parents=True, exist_ok=True)
         
-        existing_so = lib_path / "***.so"
-        if existing_so.exists():
-            so_md5_before = md5sum(existing_so)
-            task.so_md5_before = so_md5_before
-            
-            if so_md5_before == so_md5_after:
-                raise Exception("SO file MD5 is identical, no replacement needed")
-        else:
-            task.so_md5_before = "none"
+        so_replacement_info = {}
+        downloaded_files = []
         
-        # Step 8: Replace lib
-        shutil.copy(downloaded_so, existing_so)
+        for so_name, so_url in so_files.items():
+            print(f"Processing SO file: {so_name}")
+            
+            # Download SO file
+            downloaded_so = work_path / f"downloaded_{so_name}"
+            if not await download_file(so_url, downloaded_so):
+                raise Exception(f"Failed to download SO file: {so_name} from {so_url}")
+            
+            downloaded_files.append(downloaded_so)
+            
+            # Step 7: Verify architecture for this SO file
+            real_so_arch = detect_so_architecture(downloaded_so)
+            if not real_so_arch:
+                raise Exception(f"Failed to detect architecture for SO file: {so_name}")
+            
+            if real_so_arch != so_architecture:
+                raise Exception(
+                    f"Architecture mismatch for {so_name}: "
+                    f"requested {so_architecture}, but file is {real_so_arch}"
+                )
+            
+            # Check if target SO exists in APK
+            existing_so = lib_path / so_name
+            
+            if existing_so.exists():
+                so_md5_before = md5sum(existing_so)
+            else:
+                so_md5_before = "none"
+                print(f"Warning: {so_name} not found in original APK, will be added")
+            
+            so_md5_after = md5sum(downloaded_so)
+            
+            if so_md5_before != "none" and so_md5_before == so_md5_after:
+                print(f"Note: {so_name} MD5 is identical, but will still replace")
+            
+            # Store replacement info
+            so_replacement_info[so_name] = {
+                "md5_before": so_md5_before,
+                "md5_after": so_md5_after,
+                "url": so_url
+            }
+        
+        # Step 8: All architectures verified, proceed with replacement
+        for so_name, so_url in so_files.items():
+            downloaded_so = work_path / f"downloaded_{so_name}"
+            target_so = lib_path / so_name
+            shutil.copy(downloaded_so, target_so)
+            print(f"Replaced: {so_name}")
+        
+        # Store SO replacement info in task
+        task.real_so_architecture = so_architecture
+        task.so_md5_before = json.dumps(
+            {k: v["md5_before"] for k, v in so_replacement_info.items()}
+        )
+        task.so_md5_after = json.dumps(
+            {k: v["md5_after"] for k, v in so_replacement_info.items()}
+        )
         
         # Step 9: Rebuild, align, and sign APK
         unsigned_apk = work_path / "unsigned.apk"
@@ -376,7 +416,18 @@ async def process_apk_task(
         task.status = TaskStatus.COMPLETE
         task.end_process_timestamp = time.time()
         task.total_consume_seconds = task.end_process_timestamp - task.start_process_timestamp
-        task.signed_apk_download_path = f"/download/{task_id}"
+        
+        # Set download path (use DOWNLOAD_BASE_PATH if configured, otherwise use API endpoint)
+        if DOWNLOAD_BASE_PATH:
+            task.signed_apk_download_path = f"{DOWNLOAD_BASE_PATH}{task_id}_signed.apk"
+        else:
+            task.signed_apk_download_path = f"/download/{task_id}"
+        
+        # Generate SMB path if configured
+        if SMB_BASE_PATH:
+            # Construct full SMB path: \\ip\share\task_id_signed.apk
+            smb_filename = f"{task_id}_signed.apk"
+            task.smb_path = f"{SMB_BASE_PATH}{smb_filename}"
         
     except Exception as e:
         task.status = TaskStatus.FAILED
@@ -390,7 +441,7 @@ async def process_apk_task(
 async def upload_apk(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    so_download_url: str = Form(...),
+    so_files: str = Form(...),
     so_architecture: str = Form(...),
     pkg_name: str = Form(...),
     md5: Optional[str] = Form(None)
@@ -400,7 +451,9 @@ async def upload_apk(
     
     Parameters:
     - file: APK file (required)
-    - so_download_url: URL to download SO file
+    - so_files: JSON string of SO files to replace
+               Format: {"so_name1": "url1", "so_name2": "url2"}
+               Example: {"libgame.so": "http://example.com/libgame.so"}
     - so_architecture: arm64-v8a or armeabi-v7a
     - pkg_name: Package name
     - md5: Optional pre-calculated MD5 (if provided, server verifies it matches uploaded file)
@@ -414,6 +467,24 @@ async def upload_apk(
             detail="so_architecture must be 'arm64-v8a' or 'armeabi-v7a'"
         )
     
+    # Parse and validate so_files JSON
+    try:
+        so_files_dict = json.loads(so_files)
+        if not isinstance(so_files_dict, dict):
+            raise ValueError("so_files must be a JSON object")
+        if not so_files_dict:
+            raise ValueError("so_files cannot be empty")
+        for k, v in so_files_dict.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise ValueError("so_files must be {string: string}")
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="so_files must be valid JSON string"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     # Generate task ID
     task_id = str(uuid.uuid4())
     
@@ -423,7 +494,7 @@ async def upload_apk(
     
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    
+
     # Calculate MD5 (use provided MD5 or calculate from file)
     if md5:
         # Validate MD5 format
@@ -466,7 +537,7 @@ async def upload_apk(
         process_apk_task,
         task_id,
         save_path,
-        so_download_url,
+        so_files_dict,
         so_architecture,
         pkg_name,
         file_md5
@@ -545,7 +616,7 @@ async def download_cached_apk(file_md5: str, so_architecture: Optional[str] = No
 async def exist_pkg(
     background_tasks: BackgroundTasks,
     md5: str = Form(...),
-    so_download_url: str = Form(...),
+    so_files: str = Form(...),
     so_architecture: str = Form(...),
     pkg_name: str = Form(...)
 ):
@@ -557,7 +628,9 @@ async def exist_pkg(
     
     Parameters:
     - md5: MD5 hash of APK (required, must exist in index)
-    - so_download_url: URL to download SO file
+    - so_files: JSON string of SO files to replace
+               Format: {"so_name1": "url1", "so_name2": "url2"}
+               Example: {"libgame.so": "http://example.com/libgame.so"}
     - so_architecture: arm64-v8a or armeabi-v7a
     - pkg_name: Package name
     
@@ -570,6 +643,24 @@ async def exist_pkg(
             status_code=400,
             detail="so_architecture must be 'arm64-v8a' or 'armeabi-v7a'"
         )
+    
+    # Parse and validate so_files JSON
+    try:
+        so_files_dict = json.loads(so_files)
+        if not isinstance(so_files_dict, dict):
+            raise ValueError("so_files must be a JSON object")
+        if not so_files_dict:
+            raise ValueError("so_files cannot be empty")
+        for k, v in so_files_dict.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise ValueError("so_files must be {string: string}")
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="so_files must be valid JSON string"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     
     # Validate MD5 format
     if not (len(md5) == 32 and all(c in '0123456789abcdefABCDEF' for c in md5)):
@@ -626,12 +717,12 @@ async def exist_pkg(
         process_apk_task,
         task_id,
         save_path,
-        so_download_url,
+        so_files_dict,
         so_architecture,
         pkg_name,
         md5_lower
     )
-    
+
     return {
         "task_id": task_id,
         "status": "pending",
@@ -690,7 +781,7 @@ async def check_md5(md5: str):
 def root():
     return JSONResponse({
         "msg": "APK Middleware Replacement Server",
-        "version": "2.2",
+        "version": "2.3",
         "status": "running"
     })
 

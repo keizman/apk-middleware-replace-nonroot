@@ -34,18 +34,30 @@ class APKProcessClient:
     async def upload_apk(
         self,
         apk_path: str,
-        so_download_url: str,
+        so_files: dict,
         so_architecture: str,
         pkg_name: str,
         md5: str = None
     ):
-        """Upload new APK for processing (use when MD5 not in index)"""
+        """
+        Upload new APK for processing (use when MD5 not in index)
+        
+        Args:
+            apk_path: Path to APK file
+            so_files: Dictionary of SO files to replace
+                     Format: {"so_name1": "url1", "so_name2": "url2"}
+                     Example: {"libgame.so": "http://example.com/libgame.so"}
+            so_architecture: arm64-v8a or armeabi-v7a
+            pkg_name: Package name
+            md5: Optional pre-calculated MD5
+        """
+        import json
         url = f"{self.base_url}/upload"
         
         with open(apk_path, "rb") as f:
             files = {"file": (Path(apk_path).name, f, "application/vnd.android.package-archive")}
             data = {
-                "so_download_url": so_download_url,
+                "so_files": json.dumps(so_files),
                 "so_architecture": so_architecture,
                 "pkg_name": pkg_name,
             }
@@ -59,19 +71,28 @@ class APKProcessClient:
     async def process_existing_apk(
         self,
         md5: str,
-        so_download_url: str,
+        so_files: dict,
         so_architecture: str,
         pkg_name: str
     ):
         """
         Process existing APK (use when MD5 exists in index)
         No file upload required
+        
+        Args:
+            md5: MD5 hash of the APK (must exist in index)
+            so_files: Dictionary of SO files to replace
+                     Format: {"so_name1": "url1", "so_name2": "url2"}
+                     Example: {"libgame.so": "http://example.com/libgame.so"}
+            so_architecture: arm64-v8a or armeabi-v7a
+            pkg_name: Package name
         """
+        import json
         url = f"{self.base_url}/exist_pkg"
         
         data = {
             "md5": md5,
-            "so_download_url": so_download_url,
+            "so_files": json.dumps(so_files),
             "so_architecture": so_architecture,
             "pkg_name": pkg_name,
         }
@@ -83,7 +104,7 @@ class APKProcessClient:
     async def smart_upload(
         self,
         apk_path: str,
-        so_download_url: str,
+        so_files: dict,
         so_architecture: str,
         pkg_name: str
     ):
@@ -91,6 +112,14 @@ class APKProcessClient:
         Smart upload: Calculate MD5, check if exists, then choose appropriate endpoint
         
         This is the recommended way to upload APKs.
+        
+        Args:
+            apk_path: Path to APK file
+            so_files: Dictionary of SO files to replace
+                     Format: {"so_name1": "url1", "so_name2": "url2"}
+                     Example: {"libgame.so": "http://example.com/libgame.so"}
+            so_architecture: arm64-v8a or armeabi-v7a
+            pkg_name: Package name
         """
         import hashlib
         
@@ -109,7 +138,7 @@ class APKProcessClient:
             print("Using /exist_pkg endpoint (no file upload needed)...")
             return await self.process_existing_apk(
                 md5=md5,
-                so_download_url=so_download_url,
+                so_files=so_files,
                 so_architecture=so_architecture,
                 pkg_name=pkg_name
             )
@@ -118,7 +147,7 @@ class APKProcessClient:
             print("Using /upload endpoint (uploading file)...")
             return await self.upload_apk(
                 apk_path=apk_path,
-                so_download_url=so_download_url,
+                so_files=so_files,
                 so_architecture=so_architecture,
                 pkg_name=pkg_name,
                 md5=md5
@@ -174,7 +203,10 @@ async def example_smart_upload():
         # Use smart_upload - it handles everything
         result = await client.smart_upload(
             apk_path="./test.apk",
-            so_download_url="http://example.com/***.so",
+            so_files={
+                "libexample1.so": "http://example.com/libexample1.so",
+                "libexample2.so": "http://example.com/libexample2.so"
+            },
             so_architecture="arm64-v8a",
             pkg_name="com.example.app"
         )
@@ -194,8 +226,16 @@ async def example_smart_upload():
         print(f"Architecture: {final_status['real_so_architecture']}")
         print(f"Time consumed: {final_status['total_consume_seconds']:.2f}s")
         
-        # Download processed APK
-        print("\nDownloading processed APK...")
+        # Download processed APK or use SMB path
+        if final_status.get('smb_path'):
+            print(f"\n=== SMB Network Path Available ===")
+            print(f"SMB Path: {final_status['smb_path']}")
+            print(f"\nYou can install directly via ADB:")
+            print(f"  adb install {final_status['smb_path']}")
+            print("\nOr download first:")
+        else:
+            print("\nNo SMB path configured. Downloading...")
+        
         await client.download_apk(task_id, "./output_signed.apk")
         print("Download complete: ./output_signed.apk")
         
@@ -237,7 +277,10 @@ async def example_manual_check():
             print("\nStep 3: Using /exist_pkg (no file upload)...")
             result = await client.process_existing_apk(
                 md5=md5,
-                so_download_url="http://example.com/***.so",
+                so_files={
+                    "libexample1.so": "http://example.com/libexample1.so",
+                    "libexample2.so": "http://example.com/libexample2.so"
+                },
                 so_architecture="arm64-v8a",
                 pkg_name="com.example.app"
             )
@@ -248,7 +291,10 @@ async def example_manual_check():
             print("\nStep 3: Using /upload (uploading file)...")
             result = await client.upload_apk(
                 apk_path=apk_path,
-                so_download_url="http://example.com/***.so",
+                so_files={
+                    "libexample1.so": "http://example.com/libexample1.so",
+                    "libexample2.so": "http://example.com/libexample2.so"
+                },
                 so_architecture="arm64-v8a",
                 pkg_name="com.example.app",
                 md5=md5
@@ -285,10 +331,13 @@ async def example_existing_apk_only():
         print(f"Using existing APK with MD5: {md5}")
         print("No file upload required!\n")
         
-        # Process with new SO file
+        # Process with new SO files
         result = await client.process_existing_apk(
             md5=md5,
-            so_download_url="http://example.com/new-***.so",
+            so_files={
+                "libexample1.so": "http://example.com/libexample1-v2.so",
+                "libexample2.so": "http://example.com/libexample2-v2.so"
+            },
             so_architecture="arm64-v8a",
             pkg_name="com.example.app"
         )
@@ -300,9 +349,114 @@ async def example_existing_apk_only():
         await client.close()
 
 
+async def example_smb_network_install():
+    """
+    Example 4: SMB Network Installation
+    
+    Demonstrates direct APK installation via SMB network path.
+    No need to download APK - install directly from network share.
+    """
+    import subprocess
+    
+    client = APKProcessClient("http://localhost:8000")
+    
+    try:
+        print("=== SMB Network Installation Example ===\n")
+        
+        # Process APK using smart_upload
+        result = await client.smart_upload(
+            apk_path="./test.apk",
+            so_files={
+                "libexample1.so": "http://example.com/libexample1.so",
+                "libexample2.so": "http://example.com/libexample2.so"
+            },
+            so_architecture="arm64-v8a",
+            pkg_name="com.example.app"
+        )
+        
+        task_id = result["task_id"]
+        print(f"\nTask ID: {task_id}")
+        
+        # Wait for completion
+        print("\nWaiting for processing...")
+        final_status = await client.wait_for_completion(task_id)
+        
+        print("\n=== Processing Complete ===")
+        print(f"Time consumed: {final_status['total_consume_seconds']:.2f}s")
+        
+        # Check if SMB path is available
+        if final_status.get('smb_path'):
+            smb_path = final_status['smb_path']
+            print(f"\n{'='*60}")
+            print("SMB Network Path Available!")
+            print(f"{'='*60}")
+            print(f"\nSMB Path: {smb_path}")
+            print(f"\n{'='*60}")
+            print("Installation Options:")
+            print(f"{'='*60}")
+            print("\nOption 1: Direct ADB Install (Recommended)")
+            print(f"  adb install {smb_path}")
+            print("\nOption 2: ADB Install with Auto-Reinstall on Signature Mismatch")
+            print(f"  adb install -r {smb_path} || (adb uninstall com.example.app && adb install {smb_path})")
+            print("\n" + "="*60)
+            
+            # Try to install directly via ADB
+            print("\nAttempting direct installation via ADB...")
+            try:
+                result = subprocess.run(
+                    ["adb", "install", "-r", smb_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if result.returncode == 0:
+                    print("✓ Installation successful!")
+                elif "signatures do not match" in result.stderr:
+                    print("⚠ Signature mismatch detected. Uninstalling old version...")
+                    subprocess.run(
+                        ["adb", "uninstall", "com.example.app"],
+                        capture_output=True,
+                        timeout=30
+                    )
+                    print("Installing fresh copy...")
+                    result = subprocess.run(
+                        ["adb", "install", smb_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode == 0:
+                        print("✓ Installation successful!")
+                    else:
+                        print(f"✗ Installation failed: {result.stderr}")
+                else:
+                    print(f"✗ Installation failed: {result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                print("✗ Installation timed out")
+            except FileNotFoundError:
+                print("✗ ADB not found. Please ensure ADB is in your PATH")
+                print(f"\nManual installation command:")
+                print(f"  adb install {smb_path}")
+        else:
+            print("\n⚠ SMB path not configured on server")
+            print("To enable SMB installation:")
+            print('1. Set SMB_BASE_PATH in server configuration')
+            print('   Example: SMB_BASE_PATH = "\\\\\\\\192.168.1.100\\\\apk\\\\"')
+            print('2. Ensure processed APK directory is shared via SMB')
+            print('3. Restart server')
+            print("\nFalling back to download...")
+            await client.download_apk(task_id, "./output_signed.apk")
+            print("Download complete: ./output_signed.apk")
+        
+    finally:
+        await client.close()
+
+
 async def example_batch_processing():
     """
-    Example 4: Batch Processing with Smart Upload
+    Example 5: Batch Processing with Smart Upload
     
     Process multiple APKs efficiently using smart_upload.
     """
@@ -328,7 +482,11 @@ async def example_batch_processing():
         },
     ]
     
-    so_url = "http://example.com/***.so"
+    # SO files to replace
+    so_files = {
+        "libexample1.so": "http://example.com/libexample1.so",
+        "libexample2.so": "http://example.com/libexample2.so"
+    }
     
     try:
         task_ids = []
@@ -340,7 +498,7 @@ async def example_batch_processing():
             
             result = await client.smart_upload(
                 apk_path=apk_info["path"],
-                so_download_url=so_url,
+                so_files=so_files,
                 so_architecture=apk_info["arch"],
                 pkg_name=apk_info["pkg_name"]
             )
@@ -367,7 +525,7 @@ async def example_batch_processing():
 
 def sync_example():
     """
-    Example 5: Synchronous Version using requests
+    Example 6: Synchronous Version using requests
     
     For those who prefer sync code or need to use it in sync context.
     """
@@ -394,9 +552,13 @@ def sync_example():
         print(f"MD5 found! Using /exist_pkg...")
         
         # Use exist_pkg
+        import json
         data = {
             "md5": md5,
-            "so_download_url": "http://example.com/***.so",
+            "so_files": json.dumps({
+                "libexample1.so": "http://example.com/libexample1.so",
+                "libexample2.so": "http://example.com/libexample2.so"
+            }),
             "so_architecture": "arm64-v8a",
             "pkg_name": "com.example.app"
         }
@@ -406,10 +568,14 @@ def sync_example():
         print("MD5 not found. Using /upload...")
         
         # Upload APK
+        import json
         with open(apk_path, "rb") as f:
             files = {"file": ("test.apk", f, "application/vnd.android.package-archive")}
             data = {
-                "so_download_url": "http://example.com/***.so",
+                "so_files": json.dumps({
+                    "libexample1.so": "http://example.com/libexample1.so",
+                    "libexample2.so": "http://example.com/libexample2.so"
+                }),
                 "so_architecture": "arm64-v8a",
                 "pkg_name": "com.example.app",
                 "md5": md5
@@ -445,11 +611,12 @@ if __name__ == "__main__":
     print("=" * 60 + "\n")
     
     print("Available examples:")
-    print("  1. example_smart_upload()       - Recommended: Auto-detect and choose endpoint")
-    print("  2. example_manual_check()       - Manual control over MD5 check")
-    print("  3. example_existing_apk_only()  - Process existing APK (no upload)")
-    print("  4. example_batch_processing()   - Process multiple APKs")
-    print("  5. sync_example()               - Synchronous version\n")
+    print("  1. example_smart_upload()         - Recommended: Auto-detect and choose endpoint")
+    print("  2. example_manual_check()         - Manual control over MD5 check")
+    print("  3. example_existing_apk_only()    - Process existing APK (no upload)")
+    print("  4. example_smb_network_install()  - SMB network installation (no download)")
+    print("  5. example_batch_processing()     - Process multiple APKs")
+    print("  6. sync_example()                 - Synchronous version\n")
     
     # Run the recommended example
     asyncio.run(example_smart_upload())
@@ -457,6 +624,7 @@ if __name__ == "__main__":
     # To run other examples, uncomment:
     # asyncio.run(example_manual_check())
     # asyncio.run(example_existing_apk_only())
+    # asyncio.run(example_smb_network_install())
     # asyncio.run(example_batch_processing())
     # sync_example()
 

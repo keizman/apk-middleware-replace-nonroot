@@ -85,7 +85,7 @@ apksigner verify --verbose new_aligned.apk
 
 response
 
-替换前 ranger md5, 替换后 md5, apk md5 替换前后, 
+替换前 ***.so md5, 替换后 md5, apk md5 替换前后, 
  
  
 ``` log
@@ -161,6 +161,19 @@ adb: failed to install D:\Download\tmp\base\base aligned_signed.apk: Failure [-1
 - 2.且与 apktool 不能组合 缺少必要文件, 目前还是决定使用最稳妥方式
 - 3.META-INF 是原签名目录, 这里需要手动处理, apktool 打包时会自动处理(此为推测, 因为包变小了)
 
+
+#### 在服务器启用 SMB, 之后直接使用 adb install smbpath 即可安装, 无需下载, 无需想 webdav 必须 mapping, 只要可访问此服务器即可一键安装
+
+```
+wget https://github.com/9001/copyparty/releases/latest/download/copyparty-sfx.py
+python -m pip install impacket
+
+python copyparty-sfx.py --smb -v .::r -a uname:passwd   ---安全环境可以不输入 -a 设置密码, r 权限已只读
+
+adb install \\ip\a\signed.apk
+```
+
+找不到路径可以再 Windows 开启 映射输入 IP 后 浏览其会显示所有 path, 找到对应的即可
 
 
 
@@ -241,3 +254,5 @@ client 你可以再最后给一个 example 即可包括框架定义, 不用太�
 
 写一个 英文接口文档 表名接收参数范围
 增加一个设计, 客户端会再上传前计算 md5 后请求 index 接口, 如果md5 不再其中 正常处理, 如果再其中则使用选择新加的接口, exist_pkg, 传入的parameter 与 /upload 接口相同, 但不再需要上传文件, 因为有缓存, 这样分开两个接口的设计我觉得更好一些, 
+
+为了保密和高灵活性, 现决定将 downloaded_so existing_so 等最后放的命名方式, 全部变为客户端参数传入, 传入parameter 为dict - so_name: "download url " 方式, 有几个就替换几个, 比如如果 不同 so_name 并且其确实存在于 lib 即可执行替换, 另外务必检查所有 下载后的文件与 传入的 so 架构相符, 任何一个不符则代表此次任务失败. 

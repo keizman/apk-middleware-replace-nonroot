@@ -8,7 +8,7 @@ http://localhost:8000
 
 ## API Version
 
-**Version**: 2.2  
+**Version**: 2.3  
 **Protocol**: HTTP/HTTPS  
 **Format**: JSON  
 **Character Encoding**: UTF-8
@@ -133,8 +133,8 @@ curl http://localhost:8000/check_md5/5d41402abc4b2a76b9719d911017c592
 | Parameter | Type | Required | Description | Validation Rules |
 |-----------|------|----------|-------------|------------------|
 | `file` | File | **Yes** | APK file to process | - Must be a valid file<br>- File extension should be `.apk`<br>- Recommended max size: 500MB<br>- File must not be empty |
-| `so_download_url` | String | **Yes** | URL to download the replacement SO file | - Must be a valid HTTP/HTTPS URL<br>- URL must be accessible<br>- Max length: 2048 characters<br>- Examples:<br>&nbsp;&nbsp;`http://example.com/lib.so`<br>&nbsp;&nbsp;`https://cdn.example.com/files/***.so` |
-| `so_architecture` | String | **Yes** | Target architecture for SO file | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive<br>- No other values accepted |
+| `so_files` | String (JSON) | **Yes** | JSON string of SO files to replace | - Must be a valid JSON object<br>- Format: `{"so_name1": "url1", "so_name2": "url2"}`<br>- Cannot be empty<br>- Keys: SO filenames (e.g., "libgame.so")<br>- Values: HTTP/HTTPS download URLs<br>- Max URLs: 10<br>- Example:<br>&nbsp;&nbsp;`{"libgame.so": "http://example.com/libgame.so", "libengine.so": "http://example.com/libengine.so"}` |
+| `so_architecture` | String | **Yes** | Target architecture for SO files | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive<br>- All SO files must match this architecture<br>- No other values accepted |
 | `pkg_name` | String | **Yes** | Android package name | - Format: reverse domain notation<br>- Pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`<br>- Min length: 3 characters<br>- Max length: 255 characters<br>- Examples:<br>&nbsp;&nbsp;`com.example.app`<br>&nbsp;&nbsp;`com.company.product.module` |
 | `md5` | String | No | Pre-calculated MD5 hash of APK | - Format: 32 hexadecimal characters<br>- Pattern: `^[a-f0-9]{32}$`<br>- Case-insensitive<br>- If provided, server verifies MD5 matches uploaded file<br>- If omitted, server calculates MD5<br>- Example: `5d41402abc4b2a76b9719d911017c592` |
 
@@ -143,7 +143,7 @@ curl http://localhost:8000/check_md5/5d41402abc4b2a76b9719d911017c592
 ```bash
 curl -X POST http://localhost:8000/upload \
   -F "file=@/path/to/app.apk" \
-  -F "so_download_url=https://cdn.example.com/***.so" \
+  -F 'so_files={"libgame.so": "https://cdn.example.com/libgame.so", "libengine.so": "https://cdn.example.com/libengine.so"}' \
   -F "so_architecture=arm64-v8a" \
   -F "pkg_name=com.example.myapp" \
   -F "md5=5d41402abc4b2a76b9719d911017c592"
@@ -224,8 +224,8 @@ Missing required parameters:
 | Parameter | Type | Required | Description | Validation Rules |
 |-----------|------|----------|-------------|------------------|
 | `md5` | String | **Yes** | MD5 hash of existing APK | - 32 hexadecimal characters<br>- Pattern: `^[a-f0-9]{32}$`<br>- Case-insensitive<br>- **Must exist in index** |
-| `so_download_url` | String | **Yes** | URL to download the replacement SO file | - Must be a valid HTTP/HTTPS URL<br>- URL must be accessible<br>- Max length: 2048 characters |
-| `so_architecture` | String | **Yes** | Target architecture for SO file | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive |
+| `so_files` | String (JSON) | **Yes** | JSON string of SO files to replace | - Must be a valid JSON object<br>- Format: `{"so_name1": "url1", "so_name2": "url2"}`<br>- Cannot be empty<br>- Keys: SO filenames<br>- Values: HTTP/HTTPS download URLs |
+| `so_architecture` | String | **Yes** | Target architecture for SO files | - Must be one of:<br>&nbsp;&nbsp;`"arm64-v8a"` (64-bit ARM)<br>&nbsp;&nbsp;`"armeabi-v7a"` (32-bit ARM)<br>- Case-sensitive<br>- All SO files must match this architecture |
 | `pkg_name` | String | **Yes** | Android package name | - Format: reverse domain notation<br>- Pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`<br>- Min length: 3 characters<br>- Max length: 255 characters |
 
 #### Request Example (cURL)
@@ -233,7 +233,7 @@ Missing required parameters:
 ```bash
 curl -X POST http://localhost:8000/exist_pkg \
   -F "md5=5d41402abc4b2a76b9719d911017c592" \
-  -F "so_download_url=https://cdn.example.com/***.so" \
+  -F 'so_files={"libgame.so": "https://cdn.example.com/libgame.so", "libengine.so": "https://cdn.example.com/libengine.so"}' \
   -F "so_architecture=arm64-v8a" \
   -F "pkg_name=com.example.myapp"
 ```
@@ -356,14 +356,15 @@ curl http://localhost:8000/task_status/550e8400-e29b-41d4-a716-446655440000
   "pkg_name": "com.example.myapp",
   "file_md5_before": "5d41402abc4b2a76b9719d911017c592",
   "file_md5_after": "7d793037a0760186574b0282f2f435e7",
-  "so_md5_before": "098f6bcd4621d373cade4e832627b4f6",
-  "so_md5_after": "5ebe2294ecd0e0f08eab7690d2a6ee69",
+  "so_md5_before": "{\"libgame.so\": \"098f6bcd4621d373cade4e832627b4f6\", \"libengine.so\": \"5ebe2294ecd0e0f08eab7690d2a6ee69\"}",
+  "so_md5_after": "{\"libgame.so\": \"1234567890abcdef1234567890abcdef\", \"libengine.so\": \"fedcba0987654321fedcba0987654321\"}",
   "so_architecture": "arm64-v8a",
   "real_so_architecture": "arm64-v8a",
   "start_process_timestamp": 1699999999.123,
   "end_process_timestamp": 1700000045.456,
   "total_consume_seconds": 46.333,
-  "signed_apk_download_path": "/download/550e8400-e29b-41d4-a716-446655440000"
+  "signed_apk_download_path": "/download/550e8400-e29b-41d4-a716-446655440000",
+  "smb_path": "\\\\192.168.1.100\\apk\\550e8400-e29b-41d4-a716-446655440000_signed.apk"
 }
 ```
 
@@ -377,13 +378,14 @@ curl http://localhost:8000/task_status/550e8400-e29b-41d4-a716-446655440000
 | `pkg_name` | String | Android package name | Reverse domain notation |
 | `file_md5_before` | String | APK MD5 before processing | 32 hex characters |
 | `file_md5_after` | String | APK MD5 after signing | 32 hex characters (null if not complete) |
-| `so_md5_before` | String | Original SO file MD5 | 32 hex characters or `"none"` |
-| `so_md5_after` | String | Replacement SO file MD5 | 32 hex characters (null if not complete) |
+| `so_md5_before` | String (JSON) | Original SO files MD5 map | JSON string: `{"so_name": "md5", ...}` or `"none"` if not exists |
+| `so_md5_after` | String (JSON) | Replacement SO files MD5 map | JSON string: `{"so_name": "md5", ...}` (null if not complete) |
 | `so_architecture` | String | Requested architecture | `"arm64-v8a"` or `"armeabi-v7a"` |
 | `real_so_architecture` | String | Detected SO architecture | `"arm64-v8a"` or `"armeabi-v7a"` (null if not detected) |
 | `start_process_timestamp` | Float | Processing start time | Unix timestamp (seconds since epoch) |
 | `end_process_timestamp` | Float | Processing end time | Unix timestamp (null if not complete) |
 | `total_consume_seconds` | Float | Processing duration | Positive number (null if not complete) |
+| `smb_path` | String | SMB network path | Full SMB path (null if not configured) |
 | `signed_apk_download_path` | String | Download path | URL path (null if not complete) |
 
 #### Success Response (Failed)
@@ -954,7 +956,21 @@ Keep track of task IDs for later reference. Use `/index` endpoint to query histo
 
 ## Changelog
 
-**Version 2.1** (Current)
+**Version 2.3** (Current)
+- **BREAKING CHANGE**: `so_download_url` parameter replaced with `so_files` (JSON object)
+- Support multiple SO file replacements in a single task
+- Format: `{"so_name1": "url1", "so_name2": "url2"}`
+- All SO files are validated for architecture match before processing
+- Any architecture mismatch causes task failure
+- SO MD5 fields now return JSON objects containing all SO file hashes
+- Enhanced security through dynamic SO file naming
+
+**Version 2.2**
+- Added SMB network installation support
+- Added `smb_path` field to task response
+- Added `DOWNLOAD_BASE_PATH` configuration option
+
+**Version 2.1**
 - Removed cache hit shortcuts from `/upload` endpoint
 - All uploads now processed as new packages for easier updates
 - Index maintains history of multiple successful tasks per APK MD5
