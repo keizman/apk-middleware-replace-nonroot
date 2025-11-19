@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, Form, File, HTTPException, BackgroundTa
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from enum import Enum
 import subprocess
 import hashlib
@@ -16,6 +16,78 @@ import httpx
 
 app = FastAPI(title="APK Middleware Replacement Server")
 
+# ============================================================================
+# API ROUTES REGISTRY - Centralized API Management
+# ============================================================================
+API_ROUTES = {
+    "GET /": {
+        "description": "Health check and server info",
+        "parameters": [],
+        "auth_required": False
+    },
+    "GET /api_routes": {
+        "description": "Get all available API routes (this endpoint)",
+        "parameters": [],
+        "auth_required": False
+    },
+    "POST /upload": {
+        "description": "Upload new APK and start processing",
+        "parameters": [
+            {"name": "file", "type": "UploadFile", "required": True, "description": "APK file"},
+            {"name": "so_files", "type": "str (JSON)", "required": True, "description": "JSON object of SO files to replace"},
+            {"name": "so_architecture", "type": "str", "required": True, "description": "arm64-v8a or armeabi-v7a"},
+            {"name": "pkg_name", "type": "str", "required": True, "description": "Package name"},
+            {"name": "md5", "type": "str", "required": False, "description": "Pre-calculated MD5 for verification"}
+        ],
+        "auth_required": False
+    },
+    "POST /exist_pkg": {
+        "description": "Process existing APK by source MD5 (reuse uploaded APK)",
+        "parameters": [
+            {"name": "md5", "type": "str", "required": True, "description": "Source MD5 or derived MD5 from previous processing"},
+            {"name": "so_files", "type": "str (JSON)", "required": True, "description": "JSON object of SO files to replace"},
+            {"name": "so_architecture", "type": "str", "required": True, "description": "arm64-v8a or armeabi-v7a"},
+            {"name": "pkg_name", "type": "str", "required": True, "description": "Package name"}
+        ],
+        "auth_required": False
+    },
+    "GET /check_md5/{md5}": {
+        "description": "Check if MD5 exists (source or derived) and get cache info",
+        "parameters": [
+            {"name": "md5", "type": "str", "required": True, "description": "MD5 to check (can be source or derived)"}
+        ],
+        "auth_required": False
+    },
+    "GET /task_status/{task_id}": {
+        "description": "Get task processing status and details",
+        "parameters": [
+            {"name": "task_id", "type": "str", "required": True, "description": "Task UUID"}
+        ],
+        "auth_required": False
+    },
+    "GET /download/{task_id}": {
+        "description": "Download processed APK by task ID",
+        "parameters": [
+            {"name": "task_id", "type": "str", "required": True, "description": "Task UUID"}
+        ],
+        "auth_required": False
+    },
+    "GET /download_cached/{file_md5}": {
+        "description": "Download cached processed APK by MD5 (supports source and derived MD5)",
+        "parameters": [
+            {"name": "file_md5", "type": "str", "required": True, "description": "Source MD5 or derived MD5"},
+            {"name": "so_architecture", "type": "str", "required": False, "description": "Filter by architecture"}
+        ],
+        "auth_required": False
+    },
+    "GET /index": {
+        "description": "Get complete index of all processed APKs",
+        "parameters": [],
+        "auth_required": False
+    }
+}
+# ============================================================================
+
 # Configuration
 ENABLE_PKGNAME_BASED_PATH = True
 WORKDIR = Path("./workdir")
@@ -27,7 +99,7 @@ INDEX_FILE = WORKDIR / "index.json"
 # SMB Configuration for network installation
 # Set this to your SMB share path, e.g., "\\192.168.1.100\apk\"
 # Leave empty to disable SMB path generation
-SMB_BASE_PATH = ""  # Example: "\\\\192.168.1.100\\apk\\"
+SMB_BASE_PATH = "\\\\10.8.24.59\\a\\"  # Example: "\\\\192.168.1.100\\apk\\"
 DOWNLOAD_BASE_PATH = ""  # Example: "\\\\192.168.1.100\\apk\\"
 
 for d in [UPLOAD_DIR, PROCESSED_DIR, TEMP_DIR]:
@@ -70,40 +142,111 @@ class TaskInfo(BaseModel):
 tasks: Dict[str, TaskInfo] = {}
 
 
-def load_index() -> Dict[str, list]:
-    """Load index file - returns dict with MD5 as key and list of tasks as value"""
+def load_index() -> Dict[str, Any]:
+    """
+    Load index file - returns dict with source MD5 as key
+    
+    New structure:
+    {
+        "source_md5": {
+            "source_md5": "xxx",
+            "derived_md5s": ["result1", "result2", ...],
+            "tasks": [task1, task2, ...]
+        }
+    }
+    
+    Backward compatible: migrates old format automatically
+    """
     if INDEX_FILE.exists():
         with open(INDEX_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Migrate old format (single dict) to new format (list)
             migrated = {}
+            
             for md5, entry in data.items():
-                if isinstance(entry, dict):
-                    # Old format: single dict, convert to list
-                    migrated[md5] = [entry]
-                elif isinstance(entry, list):
-                    # New format: already a list
+                # Check if already new format
+                if isinstance(entry, dict) and "source_md5" in entry and "derived_md5s" in entry:
                     migrated[md5] = entry
+                # Old format: single dict task
+                elif isinstance(entry, dict) and "task_id" in entry:
+                    migrated[md5] = {
+                        "source_md5": md5,
+                        "derived_md5s": [entry.get("file_md5_after")] if entry.get("file_md5_after") else [],
+                        "tasks": [entry]
+                    }
+                # Old format: list of tasks
+                elif isinstance(entry, list):
+                    derived = list(set([t.get("file_md5_after") for t in entry if t.get("file_md5_after")]))
+                    migrated[md5] = {
+                        "source_md5": md5,
+                        "derived_md5s": derived,
+                        "tasks": entry
+                    }
+            
             return migrated
     return {}
 
 
-def save_index(index: Dict[str, list]):
-    """Save index file - stores list of tasks for each MD5"""
+def save_index(index: Dict[str, Any]):
+    """Save index file with source MD5 structure"""
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, ensure_ascii=False)
 
 
-def get_latest_cached_task(index: Dict[str, list], file_md5: str, so_architecture: str = None) -> Optional[Dict[str, Any]]:
+def find_source_md5(index: Dict[str, Any], md5: str) -> Optional[str]:
+    """
+    Find source MD5 from any MD5 (source or derived)
+    
+    Returns:
+    - source_md5 if found
+    - None if not found
+    """
+    md5_lower = md5.lower()
+    
+    # Check if it's a source MD5
+    if md5_lower in index:
+        return md5_lower
+    
+    # Check if it's a derived MD5
+    found_sources = []
+    for source_md5, entry in index.items():
+        if md5_lower in entry.get("derived_md5s", []):
+            found_sources.append(source_md5)
+    
+    # Handle edge case: MD5 collision (extremely rare)
+    if len(found_sources) > 1:
+        print(f"[WARNING] MD5 collision detected! {md5_lower} found in multiple sources: {found_sources}")
+        print(f"[WARNING] return nothing let client upload new fiel")
+        return None # 
+    elif len(found_sources) == 1:
+        return found_sources[0]
+    
+    return None
+
+
+def get_source_entry(index: Dict[str, Any], md5: str) -> Optional[Dict[str, Any]]:
+    """
+    Get source entry from any MD5 (source or derived)
+    
+    Returns the complete source entry including tasks and derived MD5s
+    """
+    source_md5 = find_source_md5(index, md5)
+    if source_md5:
+        return index[source_md5]
+    return None
+
+
+def get_latest_cached_task(index: Dict[str, Any], file_md5: str, so_architecture: str = None) -> Optional[Dict[str, Any]]:
     """
     Get the latest cached task for given MD5 and optional architecture
+    Works with both source MD5 and derived MD5
     
     Returns the most recent task entry, optionally filtered by architecture
     """
-    if file_md5 not in index:
+    source_entry = get_source_entry(index, file_md5)
+    if not source_entry:
         return None
     
-    tasks = index[file_md5]
+    tasks = source_entry.get("tasks", [])
     if not tasks:
         return None
     
@@ -119,19 +262,41 @@ def get_latest_cached_task(index: Dict[str, list], file_md5: str, so_architectur
     return max(tasks, key=lambda x: x.get("timestamp", 0))
 
 
-def add_task_to_index(index: Dict[str, list], file_md5: str, task_entry: Dict[str, Any]):
-    """Add a new task entry to index"""
-    if file_md5 not in index:
-        index[file_md5] = []
+def add_task_to_index(index: Dict[str, Any], source_md5: str, task_entry: Dict[str, Any], derived_md5: Optional[str] = None):
+    """
+    Add a new task entry to index with source MD5 structure
+    
+    Args:
+        source_md5: The original APK MD5
+        task_entry: Task information dict
+        derived_md5: The resulting APK MD5 after processing
+    """
+    if source_md5 not in index:
+        index[source_md5] = {
+            "source_md5": source_md5,
+            "derived_md5s": [],
+            "tasks": []
+        }
+    
+    # Add derived MD5 if provided and not already present
+    if derived_md5 and derived_md5 not in index[source_md5]["derived_md5s"]:
+        index[source_md5]["derived_md5s"].append(derived_md5)
     
     # Add new task entry
-    index[file_md5].append(task_entry)
+    index[source_md5]["tasks"].append(task_entry)
     
-    # Keep only last 10 tasks per MD5 to prevent unbounded growth
-    if len(index[file_md5]) > 10:
+    # Keep only last 10 tasks per source MD5 to prevent unbounded growth
+    if len(index[source_md5]["tasks"]) > 10:
         # Sort by timestamp and keep most recent 10
-        index[file_md5].sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-        index[file_md5] = index[file_md5][:10]
+        index[source_md5]["tasks"].sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        index[source_md5]["tasks"] = index[source_md5]["tasks"][:10]
+        
+        # Clean up derived_md5s that are no longer in tasks
+        kept_derived = set()
+        for task in index[source_md5]["tasks"]:
+            if task.get("file_md5_after"):
+                kept_derived.add(task["file_md5_after"])
+        index[source_md5]["derived_md5s"] = list(kept_derived)
 
 
 def md5sum(file_path: Path) -> str:
@@ -453,7 +618,7 @@ async def process_apk_task(
         task.file_md5_after = file_md5_after
         print(f"[TASK {task_id}] Final APK MD5: {file_md5_after}")
         
-        # Step 10: Update index (add new task entry, supports multiple tasks per MD5)
+        # Step 10: Update index (add new task entry with source MD5 and derived MD5)
         print(f"[TASK {task_id}] Updating index...")
         index = load_index()
         task_entry = {
@@ -464,8 +629,10 @@ async def process_apk_task(
             "file_md5_after": file_md5_after,
             "timestamp": time.time()
         }
-        add_task_to_index(index, file_md5, task_entry)
+        # file_md5 is the source MD5, file_md5_after is the derived MD5
+        add_task_to_index(index, file_md5, task_entry, derived_md5=file_md5_after)
         save_index(index)
+        print(f"[TASK {task_id}] Index updated: source_md5={file_md5}, derived_md5={file_md5_after}")
         
         # Update task
         task.status = TaskStatus.COMPLETE
@@ -602,6 +769,14 @@ async def upload_apk(
         # Calculate MD5 from uploaded file
         file_md5 = md5sum(save_path)
     
+    # Check if MD5 already exists (friendly hint, not blocking)
+    index = load_index()
+    existing_source = find_source_md5(index, file_md5)
+    if existing_source:
+        print(f"[API /upload] Note: MD5 already exists in cache")
+        print(f"[API /upload] Hint: Could use /exist_pkg endpoint to avoid re-uploading")
+        print(f"[API /upload] Proceeding with upload anyway...")
+    
     # Create task (process all uploads as new packages)
     task = TaskInfo(
         task_id=task_id,
@@ -627,8 +802,13 @@ async def upload_apk(
     response = {
         "task_id": task_id,
         "status": "pending",
-        "message": "APK processing started"
+        "message": "APK processing started",
+        "md5": file_md5
     }
+    
+    # Add hint if MD5 already exists
+    if existing_source:
+        response["hint"] = "This MD5 already exists in cache. Future processing can use /exist_pkg endpoint without uploading."
     
     print(f"[API /upload] Response: {json.dumps(response, indent=2)}\n")
     
@@ -686,11 +866,13 @@ async def download_apk(task_id: str):
 @app.get("/download_cached/{file_md5}")
 async def download_cached_apk(file_md5: str, so_architecture: Optional[str] = None):
     """
-    Download cached processed APK
+    Download cached processed APK (supports both source and derived MD5)
     
     Parameters:
-    - file_md5: MD5 hash of original APK
+    - file_md5: MD5 hash (can be source MD5 or derived MD5 from previous processing)
     - so_architecture: (Optional) Filter by architecture, returns latest matching task
+    
+    Note: Automatically resolves derived MD5 to source MD5 and returns the latest cached result
     """
     print(f"\n[API /download_cached] Request:")
     print(f"  - file_md5: {file_md5}")
@@ -732,19 +914,22 @@ async def exist_pkg(
     """
     Process existing APK by MD5 (file upload not required)
     
-    Use this endpoint when APK MD5 exists in index.
-    The original APK file will be retrieved from cache for processing.
+    This endpoint accepts both source MD5 and derived MD5.
+    It will automatically find the original APK and reuse it for processing.
     
     Parameters:
-    - md5: MD5 hash of APK (required, must exist in index)
+    - md5: MD5 hash of APK (can be source MD5 or derived MD5 from previous processing)
     - so_files: JSON string of SO files to replace
                Format: {"so_name1": "url1", "so_name2": "url2"}
                Example: {"libgame.so": "http://example.com/libgame.so"}
     - so_architecture: arm64-v8a or armeabi-v7a
     - pkg_name: Package name
     
-    Note: This endpoint requires the APK to have been uploaded before.
-    Check /index first to verify MD5 exists.
+    Workflow:
+    1. Client calls /check_md5 with current APK MD5
+    2. If exists, client calls this endpoint with that MD5
+    3. Server finds source MD5 and reuses original APK files
+    4. No upload needed - saves bandwidth and processing time
     """
     # Validate architecture
     if so_architecture not in ["arm64-v8a", "armeabi-v7a"]:
@@ -781,34 +966,44 @@ async def exist_pkg(
     md5_lower = md5.lower()
     
     print(f"\n[API /exist_pkg] Processing existing APK")
-    print(f"[API /exist_pkg] MD5: {md5_lower}")
+    print(f"[API /exist_pkg] Input MD5: {md5_lower}")
     print(f"[API /exist_pkg] Package: {pkg_name}")
     print(f"[API /exist_pkg] Architecture: {so_architecture}")
     print(f"[API /exist_pkg] SO files count: {len(so_files_dict)}")
     
-    # Check if MD5 exists in index
+    # Find source MD5 (works with both source and derived MD5)
     index = load_index()
-    if md5_lower not in index:
-        print(f"[API /exist_pkg] MD5 not found in index")
+    source_md5 = find_source_md5(index, md5_lower)
+    
+    if not source_md5:
+        print(f"[API /exist_pkg] MD5 not found in index (neither source nor derived)")
         raise HTTPException(
             status_code=404,
             detail=f"MD5 {md5_lower} not found in index. Use /upload endpoint for new APKs."
         )
     
-    print(f"[API /exist_pkg] MD5 found in index, searching for original APK...")
+    md5_type = "source" if md5_lower == source_md5 else "derived"
+    print(f"[API /exist_pkg] Found {md5_type} MD5, source_md5={source_md5}")
+    print(f"[API /exist_pkg] Searching for original APK with source MD5...")
     
-    # Find the original APK file from previous uploads
-    # Check in uploads directory for any APK with matching MD5
+    # Find the original APK file using source MD5
     original_apk = None
+    searched_count = 0
     for apk_file in UPLOAD_DIR.glob("*.apk"):
-        if md5sum(apk_file) == md5_lower:
+        searched_count += 1
+        file_md5_check = md5sum(apk_file)
+        if file_md5_check == source_md5:
             original_apk = apk_file
+            print(f"[API /exist_pkg] Found original APK: {apk_file.name}")
+            print(f"[API /exist_pkg] Verified MD5 matches: {source_md5}")
             break
+    
+    print(f"[API /exist_pkg] Searched {searched_count} APK files in uploads directory")
     
     if not original_apk or not original_apk.exists():
         raise HTTPException(
             status_code=404,
-            detail=f"Original APK file not found for MD5 {md5_lower}. Please re-upload using /upload endpoint."
+            detail=f"Original APK file not found for source MD5 {source_md5}. Please re-upload using /upload endpoint."
         )
     
     # Generate new task ID
@@ -818,14 +1013,15 @@ async def exist_pkg(
     apk_filename = f"{task_id}_{original_apk.name.split('_', 1)[-1]}"
     save_path = UPLOAD_DIR / apk_filename
     shutil.copy(original_apk, save_path)
+    print(f"[API /exist_pkg] Copied original APK to: {apk_filename}")
     
-    # Create task
+    # Create task - use source_md5 as file_md5_before
     task = TaskInfo(
         task_id=task_id,
         status=TaskStatus.PENDING,
         filename=original_apk.name,
         pkg_name=pkg_name,
-        file_md5_before=md5_lower,
+        file_md5_before=source_md5,  # Use source MD5
         so_architecture=so_architecture
     )
     tasks[task_id] = task
@@ -838,14 +1034,16 @@ async def exist_pkg(
         so_files_dict,
         so_architecture,
         pkg_name,
-        md5_lower
+        source_md5  # Pass source MD5 for indexing
     )
 
     response = {
         "task_id": task_id,
         "status": "pending",
-        "message": "APK processing started (using existing APK from cache)",
-        "md5": md5_lower
+        "message": f"APK processing started (reusing original APK, {md5_type} MD5 provided)",
+        "input_md5": md5_lower,
+        "source_md5": source_md5,
+        "md5_type": md5_type
     }
     
     print(f"[API /exist_pkg] Response: {json.dumps(response, indent=2)}\n")
@@ -853,31 +1051,64 @@ async def exist_pkg(
     return response
 
 
+@app.get("/api_routes")
+async def get_api_routes():
+    """
+    Get all available API routes with descriptions and parameters
+    
+    This endpoint provides a centralized view of all API endpoints,
+    similar to Go's api_route pattern.
+    """
+    print(f"\n[API /api_routes] Request: Get all API routes")
+    print(f"[API /api_routes] Response: {len(API_ROUTES)} routes\n")
+    
+    return {
+        "total_routes": len(API_ROUTES),
+        "routes": API_ROUTES,
+        "server_info": {
+            "title": "APK Middleware Replacement Server",
+            "version": "3.0",
+            "description": "Server for APK middleware replacement without root access"
+        }
+    }
+
+
 @app.get("/index")
 async def get_index():
-    """Get current index"""
+    """Get current index with source MD5 structure"""
     print(f"\n[API /index] Request: Get full index")
     
     index = load_index()
-    total_md5 = len(index)
-    total_tasks = sum(len(tasks) for tasks in index.values())
+    total_source_md5 = len(index)
+    total_tasks = sum(len(entry.get("tasks", [])) for entry in index.values())
+    total_derived = sum(len(entry.get("derived_md5s", [])) for entry in index.values())
     
-    print(f"[API /index] Response: {total_md5} MD5 entries, {total_tasks} total tasks\n")
+    print(f"[API /index] Response: {total_source_md5} source MD5 entries, "
+          f"{total_derived} derived MD5s, {total_tasks} total tasks\n")
     
-    return index
+    return {
+        "total_source_md5": total_source_md5,
+        "total_derived_md5": total_derived,
+        "total_tasks": total_tasks,
+        "index": index
+    }
 
 
 @app.get("/check_md5/{md5}")
 async def check_md5(md5: str):
     """
-    Check if MD5 exists in index
+    Check if MD5 exists in index (works with both source MD5 and derived MD5)
     
     Use this endpoint before deciding whether to use /upload or /exist_pkg
     
     Returns:
     - exists: boolean indicating if MD5 is in index
-    - count: number of tasks for this MD5
+    - md5_type: "source" | "derived" | null
+    - source_md5: the source MD5 (original APK MD5)
+    - derived_md5s: list of all derived MD5s from this source
+    - count: number of tasks for this source MD5
     - latest_task: most recent task info (if exists)
+    - can_reuse: boolean indicating if the APK can be reused (no upload needed)
     """
     print(f"\n[API /check_md5] Request: md5={md5}")
     
@@ -892,26 +1123,52 @@ async def check_md5(md5: str):
     md5_lower = md5.lower()
     index = load_index()
     
-    if md5_lower not in index:
+    # Find source MD5 (works with both source and derived MD5)
+    source_md5 = find_source_md5(index, md5_lower)
+    
+    if not source_md5:
         response = {
             "exists": False,
             "md5": md5_lower,
-            "count": 0
+            "md5_type": None,
+            "source_md5": None,
+            "derived_md5s": [],
+            "count": 0,
+            "can_reuse": False
         }
         print(f"[API /check_md5] Response: exists=False\n")
         return response
     
-    tasks_list = index[md5_lower]
+    # Get source entry
+    source_entry = index[source_md5]
+    tasks_list = source_entry.get("tasks", [])
+    derived_md5s = source_entry.get("derived_md5s", [])
     latest_task = max(tasks_list, key=lambda x: x.get("timestamp", 0)) if tasks_list else None
+    
+    # Determine MD5 type
+    md5_type = "source" if md5_lower == source_md5 else "derived"
     
     response = {
         "exists": True,
         "md5": md5_lower,
-        "count": len(tasks_list),
-        "latest_task": latest_task
+        "md5_type": md5_type,
+        "source_md5": source_md5,
+        "derived_md5s": derived_md5s,
+        "derived_count": len(derived_md5s),
+        "task_count": len(tasks_list),
+        "latest_task": latest_task,
+        "can_reuse": True,  # Can always reuse if MD5 exists
+        "message": f"Found {md5_type} MD5. Can use /exist_pkg endpoint to reuse original APK (no upload needed).",
+        "usage_hint": {
+            "step_1": f"Use POST /exist_pkg with md5={md5_lower} (no file upload needed)",
+            "step_2": "Provide so_files, so_architecture, and pkg_name",
+            "step_3": "Server will automatically find and reuse the original APK",
+            "benefit": "Saves bandwidth and upload time"
+        }
     }
     
-    print(f"[API /check_md5] Response: exists=True, count={len(tasks_list)}, "
+    print(f"[API /check_md5] Response: exists=True, md5_type={md5_type}, "
+          f"source_md5={source_md5}, count={len(tasks_list)}, "
           f"latest_task_id={latest_task.get('task_id') if latest_task else 'N/A'}\n")
     
     return response
@@ -921,8 +1178,20 @@ async def check_md5(md5: str):
 def root():
     response = {
         "msg": "APK Middleware Replacement Server",
-        "version": "2.3",
-        "status": "running"
+        "version": "3.0",
+        "status": "running",
+        "features": [
+            "Unified API route management",
+            "Source MD5 tracking with derived MD5s",
+            "Smart package reuse (upload once, reprocess many times)",
+            "Automatic MD5 type detection (source/derived)"
+        ],
+        "endpoints": {
+            "api_routes": "GET /api_routes - View all available APIs",
+            "check_md5": "GET /check_md5/{md5} - Check if MD5 exists (source or derived)",
+            "upload": "POST /upload - Upload new APK",
+            "exist_pkg": "POST /exist_pkg - Reuse existing APK (no upload needed)"
+        }
     }
     print(f"\n[API /] Health check: version={response['version']}, status={response['status']}\n")
     return JSONResponse(response)

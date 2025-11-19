@@ -175,6 +175,7 @@ adb install \\ip\a\signed.apk
 
 找不到路径可以再 Windows 开启 映射输入 IP 后 浏览其会显示所有 path, 找到对应的即可
 
+设备兼容问题, 出现了一台 win11 开启了 smb1,2,3 版本依旧无法install 情况, 原因未知, 报错只能看出来客户端自己断开了链接, 方案为 fallback 使用 download 再 install. 
 
 
 ### Record
@@ -256,3 +257,6 @@ client 你可以再最后给一个 example 即可包括框架定义, 不用太�
 增加一个设计, 客户端会再上传前计算 md5 后请求 index 接口, 如果md5 不再其中 正常处理, 如果再其中则使用选择新加的接口, exist_pkg, 传入的parameter 与 /upload 接口相同, 但不再需要上传文件, 因为有缓存, 这样分开两个接口的设计我觉得更好一些, 
 
 为了保密和高灵活性, 现决定将 downloaded_so existing_so 等最后放的命名方式, 全部变为客户端参数传入, 传入parameter 为dict - so_name: "download url " 方式, 有几个就替换几个, 比如如果 不同 so_name 并且其确实存在于 lib 即可执行替换, 另外务必检查所有 下载后的文件与 传入的 so 架构相符, 任何一个不符则代表此次任务失败. 
+
+
+1.py_server ezampl 能否增加一个统一的 api 管理,方便取人目前所有的 api, 类似 go 中的 api_route .逻辑无需改变 只需要一个整合的地方. 2.check_md5 he  index 逻辑需要优化, 目前的情况是, apk 每一次替换 ranger 都会改变其 md5, 导致永远无法命中缓存, 我现在需要你改变存储结构, 目前现状保留, 但新增 source md5, 记录 1 新的 upload 记录为一个 source md5 处理完成返回后记录返回的 md5 到 source md5 子集, 这个 check_md5 新的作用就是查询 客户端预检测时的 md5 是否属于已有的缓存, 这时 如果已存在则无需接收新的 apk , 直接使用source task_id 目录的文件进行 替换后打包记录, 节省了上传耗时和重复处理, 让pkg 复用成为现实
