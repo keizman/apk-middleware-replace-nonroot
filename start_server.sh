@@ -3,7 +3,7 @@
 echo "APK Middleware Replacement Server"
 echo "=================================="
 echo ""
-
+pkill -f py_server_demo
 # Check Python
 if ! command -v python3 &> /dev/null; then
     echo "Error: Python 3 not found"
@@ -44,15 +44,15 @@ if [ ! -f "requirements.txt" ]; then
 fi
 
 echo "Checking Python dependencies..."
-pip3 install -q -r requirements.txt
+#pip3 install -q -r requirements.txt
 
 # Create work directories
 mkdir -p workdir/uploads workdir/processed workdir/temp
 
 echo ""
-echo "Starting server on http://0.0.0.0:8000"
+echo "Starting server on http://0.0.0.0:8800"
 echo "Press Ctrl+C to stop"
 echo ""
 
-python3 py_server_demo.py
+nohup python3 py_server_demo.py > running.log 2>&1 &
 
