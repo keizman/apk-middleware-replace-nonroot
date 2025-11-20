@@ -1,33 +1,23 @@
-/data/app 目录是一个 APK 安装后的内置资源存储目录，访问权限需要 root，  
-而通常的 shizuku 赋权（像 MT Manager 这类工具）依旧无法访问。  
 
-run-as pkg 命令也只是获取了指定 APK 的运行时权限，获得的也只是常用的静态资源存储内容, 并非对安装包本身的完全控制。
+1. 背景与目标
+在 Android 测试中，直接替换 /data/app 下的 APK 资源通常不可行，因为需要 Root 权限；即使使用 run-as 也仅能获取有限的运行时权限, 也只是常用的静态资源存储内容, 而通常的 shizuku 赋权（像 MT Manager 这类工具）依旧无法访问。。
 
-接下来介绍的方式并非在 Android 内部进行中间件替换或替换系统层的中间件组件，  
-而是将 APK 从设备上提取出来进行解包（解压）后直接替换目标文件（例如 dex / so / assets），  
-之后重新打包并签名，再回刷到设备上进行验证。
+本方案通过 "解包 -> 替换 (Native Libs/Assets) -> 重打包 -> 重签名 -> 重安装" 的流程，实现对 APK 中间件或 Native 库的快速验证。
 
-此操作耗时大约 1m 左右，且无需获取源码权限、无需开发人员协助，减少重新 build 的耗时，  
-适用于快速验证中间件或 native 库小范围修改、开关逻辑、修复临时问题的场景。
+适用场景：
+- 快速验证 native 库小范围修改、开关逻辑、修复临时问题的场景。
+- 无需源码、无需开发介入、无需完整 Build 流程。
+- 耗时约 1 分钟。
 
-适用场景
-- 测试过程中需要快速验证 middleware 补丁或参数变更；
-
-实验: 
-1.即使使用 root 手机替换了middleware, 其也只是替换的运行目录, 而提取的安装包 base.apk 是
-原始 APK, 其并不会动态更改. ——最后考虑到操作可能也较为复杂不考虑此路径
-
-2.直接使用 HDX 等工具进行类似字节码替换. AI 分析可行性为:    可以，但前提是只做等长的小补丁且需要重新签名, 否则系统会拒绝安装或加载更新前的文件。  ——此项未尝试, 之前有看到一篇英文帖子尝试了字节替换, 可行但复杂度更高, 不考虑
-
-3.运行时 Hook（Frida / Xposed）——快速验证首选（未尝试）：  
-优点: 无需改 APK、无需重签、能立即验证行为；
-缺点：需要注入工具支持、不同 Android 版本/进程保护策略有差异，对某些 native 符号或混淆后的方法不易定位。适合作为快速验证手段。
-    
-4.动态加载新库（把 .so 放到应用私有目录并 dlopen）——需要应用配合：  
-优点：不改 APK 签名，只改运行时加载逻辑；
-缺点：需要在应用里加开关或兼容逻辑，增加代码复杂度，并且在不同 Android 版本的 SELinux / 私有目录权限下可能受限。
-
-
+### 实验: 
+1. 即使使用 root 手机替换了middleware, 其也只是替换的运行目录, 而提取的安装包 base.apk 是原始 APK, 其并不会动态更改. ——最后考虑到操作可能也较为复杂不考虑此路径
+2. 直接使用 HDX 等工具进行类似字节码替换. AI 分析可行性为:    可以，但前提是只做等长的小补丁且需要重新签名, 否则系统会拒绝安装或加载更新前的文件。  ——此项未尝试, 之前有看到一篇英文帖子尝试了字节替换, 可行但复杂度更高, 不考虑
+3. 运行时 Hook（Frida / Xposed）——快速验证首选（未尝试）：  
+    - 优点: 无需改 APK、无需重签、能立即验证行为；
+    - 缺点：需要注入工具支持、不同 Android 版本/进程保护策略有差异，对某些 native 符号或混淆后的方法不易定位。适合作为快速验证手段。
+4. 动态加载新库（把 .so 放到应用私有目录并 dlopen）——需要应用配合：  
+    - 优点：不改 APK 签名，只改运行时加载逻辑；
+    - 缺点：需要在应用里加开关或兼容逻辑，增加代码复杂度，并且在不同 Android 版本的 SELinux / 私有目录权限下可能受限。
 
 ### 服务器设置
 
@@ -38,13 +28,12 @@ run-as pkg 命令也只是获取了指定 APK 的运行时权限，获得的也�
 apt install apktool -y
 apt install apksigner -y
 apt install zipalign -y
-apt install python3 python3-pip -y
 
 # 安装 Python 依赖
 pip3 install -r requirements.txt
 ```
 
-#### 生成密钥库 (可选 - 不存在时自动生成)
+#### 生成密钥库
 
 ```bash
 keytool -genkey -v -keystore test_keystore.jks -alias testalias -keyalg RSA -keysize 2048 -validity 36500 -storepass testpass -keypass testpass -dname "CN=TestUser, OU=Test, O=TestOrg, L=TestCity, ST=TestState, C=US"
@@ -53,43 +42,50 @@ keytool -genkey -v -keystore test_keystore.jks -alias testalias -keyalg RSA -key
 keytool -list -v -keystore test_keystore.jks -storepass testpass
 ```
 
-
-
-```
+### 流程说明
 
 接收 apk 上传, 
-1.校验缓存, 有则使用原有映射(已经执行过)
+1. 校验缓存, 有则使用原有映射(已经执行过)
 
-A
+**A**
+```bash
 apktool  d -r -s base.apk -o  extracted
+```
 
-B:
+**B:**
+```bash
 wget http://10.8.16.141:8090/tmp/***.so
+```
 
-C:
+**C:**
+```bash
 cp ***.so extracted/lib/arm64-v8a/
+```
 
-D:
+**D:**
+```bash
 apktool  b extracted -o new_unsigned.apk
+```
 
-E:
+**E:**
+```bash
 zipalign -f -v 4 new_unsigned.apk new_aligned.apk
 zipalign -c -v 4 new_aligned.apk
+```
 
-
-F:
+**F:**
+```bash
 apksigner sign --ks test_keystore.jks --ks-key-alias testalias --ks-pass pass:testpass --key-pass pass:testpass --in new_aligned.apk --out signed.apk
-验证包有效
+# 验证包有效
 apksigner verify --verbose new_aligned.apk
+```
 
-
-response
+**response**
 
 替换前 ***.so md5, 替换后 md5, apk md5 替换前后, 
  
  
-``` log
-
+```log
 Verifies
 Verified using v1 scheme (JAR signing): true
 Verified using v2 scheme (APK Signature Scheme v2): true
@@ -106,65 +102,62 @@ WARNING: META-INF/services/io.grpc.ManagedChannelProvider not protected by signa
 
 
 ### client
-```
 
-1.
-adb shell pm path your.package.name 获取安装路径
-2.pull and ouput local path 
-3.upload to server
-4.wait for signal to downlaod, download
-5.install . then output log
-6.if "signatures" in real_time_err_log then uninstall && install 
+1. `adb shell pm path your.package.name` 获取安装路径
+2. pull and ouput local path 
+3. upload to server
+4. wait for signal to downlaod, download
+5. install . then output log
+6. if "signatures" in real_time_err_log then uninstall && install 
+
 err_log example
-```
 
-``` log
+```log
 Performing Streamed Install
 adb: failed to install D:\Download\new\new_aligned_signed.apk: Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package com.mobile.brasiltvmobile signatures do not match previously installed version; ignoring!]
 ```
 
-
 打印 md5 file size 耗时 对比
 
 
-TIP
-```
-1.加固包大概率不可用
-2.除特定 apk: (暂无) 外, 替换中间件意味着签名改变需要 uninstall 再安装, 数据会丢失
-3.耗时大约 1 分钟左右, 运行期间请等待
-```
+### TIP
 
+1. 加固包大概率不可用
+2. 除特定 apk: (暂无) 外, 替换中间件意味着签名改变需要 uninstall 再安装, 数据会丢失
+3. 耗时大约 1 分钟左右, 运行期间请等待
 
 
 ### Anthor test
 使用 zip  测
-```
 
 1.
+```bash
 unzip base.apk -d extracted_zip
+```
 
 替换后
 
 2.
+```bash
 zip -r -9 zip_unsigned.apk . -x "META-INF/*" -0 "resources.arsc" -0 "AndroidManifest.xml"
+```
 其它步骤相同
 
 resources.arsc  参数因为下方报错
+```log
 Performing Streamed Install
 adb: failed to install D:\Download\tmp\base\base aligned_signed.apk: Failure [-124: Failed parse during installPackageLI: Targeting R+ (version 30 and above) requires the resources.arsc of installed APKs to be stored uncompressed and aligned on a 4-byte boundary]
-
-
 ```
 
 结论为: 
-- 1.zip 方式也可以, 但打包后的目录文件 3 倍大, 即使使用最高压缩. 
-- 2.且与 apktool 不能组合 缺少必要文件, 目前还是决定使用最稳妥方式
-- 3.META-INF 是原签名目录, 这里需要手动处理, apktool 打包时会自动处理(此为推测, 因为包变小了)
+- 1. zip 方式也可以, 但打包后的目录文件 3 倍大, 即使使用最高压缩. 
+- 2. 且与 apktool 不能组合 缺少必要文件, 目前还是决定使用最稳妥方式
+- 3. META-INF 是原签名目录, 这里需要手动处理, apktool 打包时会自动处理(此为推测, 因为包变小了)
 
 
 #### 在服务器启用 SMB, 之后直接使用 adb install smbpath 即可安装, 无需下载, 无需想 webdav 必须 mapping, 只要可访问此服务器即可一键安装
 
-```
+```bash
 wget https://github.com/9001/copyparty/releases/latest/download/copyparty-sfx.py
 python -m pip install impacket
 
@@ -180,7 +173,6 @@ adb install \\ip\a\signed.apk
 
 ### Record
 
-
 zipalign 是 google 要求的必须要对其的步骤, 
 apksigner 签名是第一层 android 系统就会校验, 不进行任何签名安装会也会报错, 
 
@@ -194,36 +186,31 @@ test_keystore 内装的就是密钥和公钥内容, 目前因需要操作的 APK
 代码一般会进行混淆, 放置反编译后完全查看到代码, 但是若要找东西依旧有迹可循, 因此假设加了混淆
 因此一般反编译出的根本完全不是 source, 只是 LLM 有相关概念, 能看懂大概意思
 
-
-
-
 ----
 
-设计完善 prompt
+### 设计完善 prompt
 
-1.server 和 client 支持多线程传输, 内网速度够快, 先不考虑
+1. server 和 client 支持多线程传输, 内网速度够快, 先不考虑
 
-enable_pkgName_based_path = Ture or false 
+`enable_pkgName_based_path = Ture or false`
 
 每一步此任务处于不同状态
-1.接收APK , 完成后服务器返回 task_id
-3.check MD5 is request.md5 then md5sum_res = request.md5 , 
-4.create path name f_path = pkg_name + md5sum_res if enable_pkgName_based_path else md5sum_res
-5.extract use apktool
-6.download from  so_download_url as {A} file 
-7.confirm the real_so_architecture and the so_architecture are equal
-real_so_architecture = file {A}
-if 64-bit is arm64-v8a
-if 32-bit is armeabi-v7a
-then 
-B = extracted/lib/{real_so_architecture}
-check md5sum(A) and md5sum(B) are different
-
-8.Replacing lib, mv A to B
-9.Rebuilding APK, Aligning APK, Signing APK
-keep the final apk (Signing APK) delete other .apk file, no need delete origin apk file and extracted folder
-
-10.记录 md5 到 index
+1. 接收APK , 完成后服务器返回 task_id
+3. check MD5 is request.md5 then md5sum_res = request.md5 , 
+4. create path name f_path = pkg_name + md5sum_res if enable_pkgName_based_path else md5sum_res
+5. extract use apktool
+6. download from  so_download_url as {A} file 
+7. confirm the real_so_architecture and the so_architecture are equal
+    - real_so_architecture = file {A}
+    - if 64-bit is arm64-v8a
+    - if 32-bit is armeabi-v7a
+    - then 
+    - B = extracted/lib/{real_so_architecture}
+    - check md5sum(A) and md5sum(B) are different
+8. Replacing lib, mv A to B
+9. Rebuilding APK, Aligning APK, Signing APK
+    - keep the final apk (Signing APK) delete other .apk file, no need delete origin apk file and extracted folder
+10. 记录 md5 到 index
 
 success status: complete, and other param 
 generate respone {task_id: , "filename": file.filename, "file_md5_before": "",  "file_md5_after": "", "so_md5_before": "",  "so_md5_after": "so_architecture","real_so_architecture", total_consum...: , start_process_timestamp: , end_process_timestamp, Signed_apk_download_path:"", pkg_name: ""}
@@ -234,12 +221,10 @@ arm64-v8a or is equal aarch64,
 armeabi-v7a
 
 branch 1
-1.IF request.md5 in index file, Then excute form step 6, and no need receive more bytes from client
+1. IF request.md5 in index file, Then excute form step 6, and no need receive more bytes from client
 
 
-
-
-API 
+### API 
 /upload input {"filename": file.filename, "md5": md5sum(save_path), "so_download_url", so_architecture: only suport arm64-v8a or  armeabi-v7a, pkg_name: ""}
 
 /task_status API check the current status
@@ -259,4 +244,5 @@ client 你可以再最后给一个 example 即可包括框架定义, 不用太�
 为了保密和高灵活性, 现决定将 downloaded_so existing_so 等最后放的命名方式, 全部变为客户端参数传入, 传入parameter 为dict - so_name: "download url " 方式, 有几个就替换几个, 比如如果 不同 so_name 并且其确实存在于 lib 即可执行替换, 另外务必检查所有 下载后的文件与 传入的 so 架构相符, 任何一个不符则代表此次任务失败. 
 
 
-1.py_server ezampl 能否增加一个统一的 api 管理,方便取人目前所有的 api, 类似 go 中的 api_route .逻辑无需改变 只需要一个整合的地方. 2.check_md5 he  index 逻辑需要优化, 目前的情况是, apk 每一次替换 ranger 都会改变其 md5, 导致永远无法命中缓存, 我现在需要你改变存储结构, 目前现状保留, 但新增 source md5, 记录 1 新的 upload 记录为一个 source md5 处理完成返回后记录返回的 md5 到 source md5 子集, 这个 check_md5 新的作用就是查询 客户端预检测时的 md5 是否属于已有的缓存, 这时 如果已存在则无需接收新的 apk , 直接使用source task_id 目录的文件进行 替换后打包记录, 节省了上传耗时和重复处理, 让pkg 复用成为现实
+1. py_server ezampl 能否增加一个统一的 api 管理,方便取人目前所有的 api, 类似 go 中的 api_route .逻辑无需改变 只需要一个整合的地方. 
+2. check_md5 he  index 逻辑需要优化, 目前的情况是, apk 每一次替换 ranger 都会改变其 md5, 导致永远无法命中缓存, 我现在需要你改变存储结构, 目前现状保留, 但新增 source md5, 记录 1 新的 upload 记录为一个 source md5 处理完成返回后记录返回的 md5 到 source md5 子集, 这个 check_md5 新的作用就是查询 客户端预检测时的 md5 是否属于已有的缓存, 这时 如果已存在则无需接收新的 apk , 直接使用source task_id 目录的文件进行 替换后打包记录, 节省了上传耗时和重复处理, 让pkg 复用成为现实
